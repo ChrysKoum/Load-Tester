@@ -21,13 +21,19 @@ from config.hono_config import HonoConfig
 
 class ProtocolWorkers:
     """Contains worker functions for different protocols."""
-
-    def __init__(self, config: HonoConfig, stats: Dict, protocol_stats: Dict, reporting_manager=None):
+    
+    def __init__(self, config: HonoConfig, shared_stats: Dict, protocol_stats: Dict, reporting_manager=None):
         self.config = config
-        self.stats = stats  # Overall stats
-        self.protocol_stats = protocol_stats # Per-protocol stats
+        self.shared_stats = shared_stats
+        self.protocol_stats = protocol_stats
         self.reporting_manager = reporting_manager
         self.running = False
+        
+        # Setup logging
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        )
         self.logger = logging.getLogger(__name__)
 
     def set_running(self, running: bool):
@@ -181,13 +187,19 @@ class ProtocolWorkers:
 
                 if msg_info.rc == mqtt.MQTT_ERR_SUCCESS:
                     if self.reporting_manager:
-                        self.reporting_manager.record_message_metrics(mqtt_protocol_key, response_time_ms, 200, message_size_bytes)
-                    self._update_stats(mqtt_protocol_key, success=True)
+                        self.reporting_manager.record_message_sent("mqtt")
+                        # Record latency metrics if available
+                        if 'response_time_ms' in locals():
+                            self.reporting_manager.record_latency_metrics(response_time_ms)
+                    else:
+                        self.shared_stats['messages_sent'] += 1
                     message_count += 1
                     self.logger.debug(f"MQTT message {message_count} sent by {device.device_id} to topic '{topic}' in {response_time_ms:.0f}ms")
                 else:
                     if self.reporting_manager:
-                        self.reporting_manager.record_message_metrics(mqtt_protocol_key, response_time_ms, 500, message_size_bytes) # Using 500 as generic error
+                        self.reporting_manager.record_message_failed("mqtt")
+                    else:
+                        self.shared_stats['messages_failed'] += 1
                     self.logger.warning(f"MQTT publish failed for device {device.device_id}: {mqtt.error_string(msg_info.rc)} (rc: {msg_info.rc})")
                     self._update_stats(mqtt_protocol_key, success=False)
                     # Decide if to break loop on publish failure or continue
@@ -298,40 +310,83 @@ class ProtocolWorkers:
 
                         if self.reporting_manager:
                             self.reporting_manager.record_message_metrics(
-                                http_protocol_key, response_time_ms, response.status, message_size_bytes
+                                protocol=http_protocol_key,
+                                response_time_ms=response_time_ms,
+                                status_code=response.status,
+                                message_size_bytes=len(payload_json_str.encode('utf-8')), # Corrected variable here
+                                success=True
                             )
+                            self.logger.debug(f"HTTP success for {device.device_id}: {response.status}, {response_time_ms:.2f}ms")
+                        else: # Fallback if reporting_manager is somehow not available
+                            self.shared_stats['messages_sent'] += 1
+                            if http_protocol_key in self.protocol_stats:
+                                self.protocol_stats[http_protocol_key]['messages_sent'] += 1
+                        
+                        # Optionally read response content if needed, e.g., for validation
+                        # response_text = await response.text() 
+                        # self.logger.debug(f"HTTP Response for {device.device_id}: {response_text[:100]}")
 
-                        if 200 <= response.status < 300:
-                            self._update_stats(http_protocol_key, success=True)
-                            message_count += 1
-                            self.logger.debug(f"HTTP message {message_count} sent by {device.device_id}: {response.status} in {response_time_ms:.0f}ms")
+
+                    if response.status >= 400:
+                        self.logger.warning(f"HTTP error for device {device.device_id}: {response.status}")
+                        if self.reporting_manager:
+                            # This path might be redundant if record_message_metrics handles success=False
+                            # but kept for clarity if record_message_metrics is only called on successful HTTP transaction
+                            self.reporting_manager.record_message_failed(http_protocol_key)
                         else:
-                            self._update_stats(http_protocol_key, success=False)
-                            response_text = await response.text()
-                            self.logger.warning(f"HTTP publish failed for {device.device_id}: {response.status} in {response_time_ms:.0f}ms. Body: {response_text[:200]}")
+                            self.shared_stats['messages_failed'] += 1
+                            if http_protocol_key in self.protocol_stats:
+                                 self.protocol_stats[http_protocol_key]['messages_failed'] += 1
+                
+                except aiohttp.ClientConnectorError as e:
+                    end_time = time.monotonic()
+                    response_time_ms = (end_time - start_time) * 1000
+                    self.logger.error(f"HTTP connection error for device {device.device_id}: {e}")
+                    if self.reporting_manager:
+                        self.reporting_manager.record_message_metrics(
+                            protocol=http_protocol_key,
+                            response_time_ms=response_time_ms,
+                            status_code=599, # Custom code for connection error
+                            message_size_bytes=message_size_bytes,
+                            success=False
+                        )
+                    else:
+                        self.shared_stats['messages_failed'] += 1
+                        if http_protocol_key in self.protocol_stats:
+                            self.protocol_stats[http_protocol_key]['messages_failed'] += 1
+                
+                except asyncio.TimeoutError:
+                    end_time = time.monotonic()
+                    response_time_ms = (end_time - start_time) * 1000
+                    self.logger.warning(f"HTTP timeout for device {device.device_id}")
+                    if self.reporting_manager:
+                        self.reporting_manager.record_message_metrics(
+                            protocol=http_protocol_key,
+                            response_time_ms=response_time_ms, # or a fixed high value for timeout
+                            status_code=408, # HTTP Timeout
+                            message_size_bytes=message_size_bytes,
+                            success=False
+                        )
+                    else:
+                        self.shared_stats['messages_failed'] += 1
+                        if http_protocol_key in self.protocol_stats:
+                            self.protocol_stats[http_protocol_key]['messages_failed'] += 1
 
-                except aiohttp.ClientConnectorError as e: # More specific network errors
-                    end_time = time.monotonic()
-                    response_time_ms = (end_time - start_time) * 1000
-                    self.logger.error(f"HTTP ClientConnectorError for {device.device_id} to {url}: {e}")
-                    if self.reporting_manager:
-                        self.reporting_manager.record_message_metrics(http_protocol_key, response_time_ms, 503, message_size_bytes) # 503 Service Unavailable
-                    self._update_stats(http_protocol_key, success=False)
-                except asyncio.TimeoutError: # Timeout from aiohttp.ClientTimeout
-                    end_time = time.monotonic()
-                    response_time_ms = (end_time - start_time) * 1000
-                    self.logger.error(f"HTTP request timeout for {device.device_id} to {url} after {self.config.http_timeout}s")
-                    if self.reporting_manager:
-                         self.reporting_manager.record_message_metrics(http_protocol_key, response_time_ms, 504, message_size_bytes) # 504 Gateway Timeout
-                    self._update_stats(http_protocol_key, success=False)
                 except Exception as e:
-                    end_time = time.monotonic() # Ensure end_time is set
+                    end_time = time.monotonic()
                     response_time_ms = (end_time - start_time) * 1000
-                    self.logger.exception(f"HTTP worker generic error for {device.device_id} to {url}: {e}") # Use .exception for stack trace
+                    self.logger.error(f"HTTP general error for device {device.device_id}: {e}", exc_info=True)
                     if self.reporting_manager:
-                        self.reporting_manager.record_message_metrics(http_protocol_key, response_time_ms, response_status_code, message_size_bytes)
-                    self._update_stats(http_protocol_key, success=False)
+                         self.reporting_manager.record_message_metrics(
+                            protocol=http_protocol_key,
+                            response_time_ms=response_time_ms,
+                            status_code=598, # Custom code for other client-side error
+                            message_size_bytes=message_size_bytes,
+                            success=False
+                        )
+                    else:
+                        self.shared_stats['messages_failed'] += 1
+                        if http_protocol_key in self.protocol_stats:
+                            self.protocol_stats[http_protocol_key]['messages_failed'] += 1
 
-                if not self.running:
-                    break
                 await asyncio.sleep(message_interval)

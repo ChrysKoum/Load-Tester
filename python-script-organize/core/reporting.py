@@ -8,8 +8,9 @@ import datetime
 import threading
 import logging
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
+from models.device import Device  # Add this import
 from utils.constants import REPORTING_AVAILABLE
 
 if REPORTING_AVAILABLE:
@@ -91,50 +92,209 @@ class ReportingManager:
             'min_throughput_rps': 10  # Minimum acceptable throughput
         }
 
+    def initialize_test(self, protocols: List[str]):
+        """Initialize test with specified protocols."""
+        self.test_start_time = time.time()
+        # Clear the existing dictionary and update it, instead of reassigning
+        self.protocol_stats.clear() 
+        for protocol in protocols:
+            self.protocol_stats[str(protocol).lower()] = {'messages_sent': 0, 'messages_failed': 0, 'devices': 0}
+        self.logger.info(f"Test initialized. protocol_stats: {self.protocol_stats} for input protocols: {protocols}")
+
+    def set_running(self, running: bool):
+        """Set the running state of the test."""
+        self.running = running
+        if not running and self.test_start_time:
+            self.test_end_time = time.time()
+
+    def generate_report(self, tenants: List[str], devices: List[Device], report_dir: str = "./reports"):
+        """Generate detailed test report with charts."""
+        import os
+        import datetime
+        
+        # Create reports directory if it doesn't exist
+        os.makedirs(report_dir, exist_ok=True)
+        
+        # Generate timestamp for unique filename
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        report_file = os.path.join(report_dir, f"hono_test_report_{timestamp}.txt")
+        
+        # Calculate test duration
+        if self.test_start_time:
+            if self.test_end_time:
+                test_duration = self.test_end_time - self.test_start_time
+            else:
+                test_duration = time.time() - self.test_start_time
+        else:
+            test_duration = 0
+        
+        # Generate report content
+        report_content = self._generate_report_content(tenants, devices, test_duration)
+        
+        # Write report to file
+        try:
+            with open(report_file, 'w') as f:
+                f.write(report_content)
+            self.logger.info(f"Report saved to: {report_file}")
+        except Exception as e:
+            self.logger.error(f"Failed to save report: {e}")
+
+    def _generate_report_content(self, tenants: List[str], devices: List[Device], test_duration: float) -> str:
+        """Generate the content for the test report."""
+        import datetime
+        
+        total_messages = self.stats['messages_sent'] + self.stats['messages_failed']
+        success_rate = (self.stats['messages_sent'] / total_messages * 100) if total_messages > 0 else 0
+        avg_rate = self.stats['messages_sent'] / test_duration if test_duration > 0 else 0
+        
+        devices_per_tenant = len(devices) / len(tenants) if tenants else 0
+        validation_rate = (self.stats['validation_success'] / (self.stats['validation_success'] + self.stats['validation_failed']) * 100) if (self.stats['validation_success'] + self.stats['validation_failed']) > 0 else 0
+        
+        content = f"""============================================================
+HONO LOAD TEST DETAILED REPORT
+============================================================
+
+Test Date: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+Test Duration: {test_duration:.2f} seconds
+
+CONFIGURATION
+----------------------------------------
+Registry: {self.config.registry_ip}:{self.config.registry_port}
+MQTT Adapter: {self.config.mqtt_adapter_ip}:{self.config.mqtt_adapter_port}
+HTTP Adapter: {self.config.http_adapter_ip}:{self.config.http_adapter_port}
+MQTT TLS: {self.config.use_mqtt_tls}
+HTTP TLS: {self.config.use_tls}
+
+TEST INFRASTRUCTURE
+----------------------------------------
+Tenants: {len(tenants)}
+Devices: {len(devices)}
+Devices per Tenant: {devices_per_tenant:.1f}
+
+VALIDATION RESULTS
+----------------------------------------
+Validation Success: {self.stats['validation_success']}
+Validation Failed: {self.stats['validation_failed']}
+Validation Rate: {validation_rate:.1f}%
+
+LOAD TEST RESULTS
+----------------------------------------
+Messages Sent: {self.stats['messages_sent']}
+Messages Failed: {self.stats['messages_failed']}
+Success Rate: {success_rate:.1f}%
+Average Message Rate: {avg_rate:.2f} messages/second
+
+PROTOCOL BREAKDOWN
+----------------------------------------"""
+
+        # Add protocol-specific stats
+        for protocol, stats in self.protocol_stats.items():
+            protocol_total = stats['messages_sent'] + stats['messages_failed']
+            protocol_success_rate = (stats['messages_sent'] / protocol_total * 100) if protocol_total > 0 else 100.0
+            
+            content += f"""
+Protocol: {protocol.upper()}
+  Devices: {stats['devices']}
+  Messages Sent: {stats['messages_sent']}
+  Messages Failed: {stats['messages_failed']}
+  Success Rate: {protocol_success_rate:.1f}%"""
+
+        content += f"""
+
+============================================================
+Report generated at: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
+
+        return content
+
+    def print_enhanced_final_stats(self):
+        """Print enhanced final statistics."""
+        if not self.test_start_time:
+            print("❌ No test data available")
+            return
+
+        test_duration = (self.test_end_time or time.time()) - self.test_start_time
+        total_messages = self.stats['messages_sent'] + self.stats['messages_failed']
+        success_rate = (self.stats['messages_sent'] / total_messages * 100) if total_messages > 0 else 0
+        avg_rate = self.stats['messages_sent'] / test_duration if test_duration > 0 else 0
+
+        print("\n" + "="*60)
+        print("📊 ENHANCED LOAD TEST RESULTS")
+        print("="*60)
+        print(f"⏱️  Test Duration: {test_duration:.2f} seconds")
+        print(f"📤 Messages Sent: {self.stats['messages_sent']}")
+        print(f"❌ Messages Failed: {self.stats['messages_failed']}")
+        print(f"✅ Success Rate: {success_rate:.1f}%")
+        print(f"📈 Average Rate: {avg_rate:.2f} msg/sec")
+        
+        # Protocol breakdown
+        if self.protocol_stats:
+            print(f"\n📋 Protocol Breakdown:")
+            for protocol, stats in self.protocol_stats.items():
+                protocol_total = stats['messages_sent'] + stats['messages_failed']
+                protocol_success = (stats['messages_sent'] / protocol_total * 100) if protocol_total > 0 else 100.0
+                print(f"   {protocol.upper()}: {stats['messages_sent']}/{protocol_total} ({protocol_success:.1f}%)")
+
+        print("="*60)
+
+    def print_final_stats(self):
+        """Print final statistics."""
+        self.print_enhanced_final_stats()
+        # if hasattr(self, 'print_advanced_findings'): # This can be added back if print_advanced_findings is implemented
+
     def record_latency_metrics(self, response_time_ms: float):
         """Record latency metrics and check SLA violations."""
         self.performance_metrics['response_times'].append(response_time_ms)
+        # Use a sliding window for real-time percentile calculation if needed
         self.performance_metrics['latency_history'].append(response_time_ms)
-        
-        # Keep only last 1000 measurements for sliding window
-        if len(self.performance_metrics['latency_history']) > 1000:
+        if len(self.performance_metrics['latency_history']) > 1000: # Keep last 1000 for sliding window
             self.performance_metrics['latency_history'].pop(0)
-        
-        # Track SLA violations
-        if response_time_ms > 1000:
-            self.performance_metrics['latency_sla_violations']['1000ms'] += 1
-        elif response_time_ms > 500:
-            self.performance_metrics['latency_sla_violations']['500ms'] += 1
+
+        # Track SLA violations based on defined thresholds
+        if response_time_ms > self.sla_thresholds.get('p99_latency_ms', 1000): # Default to 1000ms if not set
+            self.performance_metrics['latency_sla_violations']['1000ms'] += 1 # Or use a dynamic key based on SLA
+        elif response_time_ms > self.sla_thresholds.get('p95_latency_ms', 500): # Default to 500ms
+             self.performance_metrics['latency_sla_violations']['500ms'] += 1
+        # Add more granular SLA checks if needed
         elif response_time_ms > 200:
             self.performance_metrics['latency_sla_violations']['200ms'] += 1
         elif response_time_ms > 100:
             self.performance_metrics['latency_sla_violations']['100ms'] += 1
         elif response_time_ms > 50:
             self.performance_metrics['latency_sla_violations']['50ms'] += 1
+        
+        # Potentially update performance degradation metrics here
+        # For example, compare current_latency (e.g., avg of last N) to baseline_latency
 
-    def calculate_percentiles(self, data_list):
+    def calculate_percentiles(self, data_list: List[float], percentiles_to_calc: List[float] = None) -> Dict[str, float]:
         """Calculate various percentiles from a data list."""
         if not data_list:
             return {}
         
+        if percentiles_to_calc is None:
+            percentiles_to_calc = [50, 90, 95, 99, 99.9]
+            
         sorted_data = sorted(data_list)
         length = len(sorted_data)
         
-        percentiles = {}
-        for p in [50, 90, 95, 99, 99.9]:
-            index = int((p / 100.0) * length)
-            if index >= length:
-                index = length - 1
-            percentiles[f'p{p}'] = sorted_data[index]
+        calculated_percentiles = {}
+        for p in percentiles_to_calc:
+            if not (0 < p <= 100):
+                self.logger.warning(f"Invalid percentile requested: {p}. Skipping.")
+                continue
+            index = int((p / 100.0) * (length -1)) # Corrected index calculation for 0-based list
+            calculated_percentiles[f'p{p}'] = sorted_data[index]
         
-        return percentiles
+        return calculated_percentiles
 
-    def get_real_time_latency_stats(self):
-        """Get real-time latency statistics."""
+    def get_real_time_latency_stats(self) -> Optional[Dict]:
+        """Get real-time latency statistics from the latency_history."""
         if not self.performance_metrics['latency_history']:
             return None
         
-        recent_latencies = self.performance_metrics['latency_history'][-100:]  # Last 100 measurements
+        recent_latencies = self.performance_metrics['latency_history'] # Use the whole history or a recent slice
+        if not recent_latencies: # Double check if history became empty
+            return None
+
         percentiles = self.calculate_percentiles(recent_latencies)
         
         return {
@@ -145,326 +305,117 @@ class ReportingManager:
             'sample_size': len(recent_latencies)
         }
 
-    def check_performance_degradation(self):
-        """Check for performance degradation over time."""
-        if len(self.performance_metrics['response_times']) < 100:
-            return None
-        
-        # Compare first quarter vs last quarter of test
-        total_measurements = len(self.performance_metrics['response_times'])
-        quarter_size = total_measurements // 4
-        
-        if quarter_size < 10:
-            return None
-        
-        baseline = self.performance_metrics['response_times'][:quarter_size]
-        current = self.performance_metrics['response_times'][-quarter_size:]
-        
-        baseline_avg = sum(baseline) / len(baseline)
-        current_avg = sum(current) / len(current)
-        
-        degradation = ((current_avg - baseline_avg) / baseline_avg) * 100 if baseline_avg > 0 else 0
-        
-        self.performance_metrics['performance_degradation'] = {
-            'baseline_latency': baseline_avg,
-            'current_latency': current_avg,
-            'degradation_percentage': degradation
-        }
-        
-        return degradation
+    def record_message_metrics(self, protocol: str, response_time_ms: float, status_code: int, message_size_bytes: int = 0, success: bool = True):
+        """Record comprehensive metrics for a message attempt."""
+        if success:
+            self.record_message_sent(protocol)
+        else:
+            self.record_message_failed(protocol)
 
-    def analyze_latency_patterns(self):
-        """Analyze latency patterns and anomalies."""
-        if len(self.performance_metrics['response_times']) < 50:
-            return {}
-        
-        latencies = self.performance_metrics['response_times']
-        percentiles = self.calculate_percentiles(latencies)
-        
-        # Calculate standard deviation
-        mean_latency = sum(latencies) / len(latencies)
-        variance = sum((x - mean_latency) ** 2 for x in latencies) / len(latencies)
-        std_dev = variance ** 0.5
-        
-        # Identify outliers (values beyond 2 standard deviations)
-        outliers = [x for x in latencies if abs(x - mean_latency) > 2 * std_dev]
-        
-        # Calculate jitter (variability)
-        jitter = std_dev / mean_latency * 100 if mean_latency > 0 else 0
-        
-        return {
-            'percentiles': percentiles,
-            'mean': mean_latency,
-            'std_dev': std_dev,
-            'jitter_percent': jitter,
-            'outliers_count': len(outliers),
-            'outliers_percent': (len(outliers) / len(latencies)) * 100,
-            'consistency_score': max(0, 100 - jitter)  # Higher is more consistent
-        }
+        self.record_latency_metrics(response_time_ms) # Assumes record_latency_metrics exists and takes response_time_ms
 
-    def print_advanced_findings(self):
-        """Print advanced performance findings and analysis."""
-        print("\n" + "="*80)
-        print("🔬 ADVANCED PERFORMANCE ANALYSIS")
-        print("="*80)
-        
-        # Latency Analysis
-        latency_analysis = self.analyze_latency_patterns()
-        if latency_analysis:
-            print(f"\n📊 Latency Analysis:")
-            percentiles = latency_analysis['percentiles']
-            
-            print(f"   Mean latency: {latency_analysis['mean']:.1f} ms")
-            print(f"   Standard deviation: {latency_analysis['std_dev']:.1f} ms")
-            print(f"   Jitter: {latency_analysis['jitter_percent']:.1f}%")
-            print(f"   Consistency Score: {latency_analysis['consistency_score']:.1f}/100")
-            
-            print(f"\n📈 Latency Percentiles:")
-            for key, value in percentiles.items():
-                print(f"   {key}: {value:.1f} ms")
-            
-            # SLA Compliance Check
-            print(f"\n🎯 SLA Compliance:")
-            p95_compliant = percentiles.get('p95', 0) <= self.sla_thresholds['p95_latency_ms']
-            p99_compliant = percentiles.get('p99', 0) <= self.sla_thresholds['p99_latency_ms']
-            
-            p95_status = "✅ PASS" if p95_compliant else "❌ FAIL"
-            p99_status = "✅ PASS" if p99_compliant else "❌ FAIL"
-            
-            print(f"   95th percentile < {self.sla_thresholds['p95_latency_ms']}ms: {p95_status} ({percentiles.get('p95', 0):.1f}ms)")
-            print(f"   99th percentile < {self.sla_thresholds['p99_latency_ms']}ms: {p99_status} ({percentiles.get('p99', 0):.1f}ms)")
-            
-            # Outlier Analysis
-            if latency_analysis['outliers_count'] > 0:
-                print(f"\n⚠️  Outlier Detection:")
-                print(f"   Outliers found: {latency_analysis['outliers_count']} ({latency_analysis['outliers_percent']:.1f}%)")
-                if latency_analysis['outliers_percent'] > 5:
-                    print(f"   🚨 High outlier rate detected - investigate network/server issues")
-                elif latency_analysis['outliers_percent'] > 1:
-                    print(f"   ⚠️  Moderate outlier rate - monitor for patterns")
-                else:
-                    print(f"   ✅ Low outlier rate - acceptable variance")
-        
-        # Performance Degradation Analysis
-        degradation = self.check_performance_degradation()
-        if degradation is not None:
-            print(f"\n📉 Performance Degradation Analysis:")
-            baseline = self.performance_metrics['performance_degradation']['baseline_latency']
-            current = self.performance_metrics['performance_degradation']['current_latency']
-            
-            print(f"   Baseline latency: {baseline:.1f} ms")
-            print(f"   Current latency: {current:.1f} ms")
-            print(f"   Change: {degradation:+.1f}%")
-            
-            if degradation > 20:
-                print(f"   🚨 Significant performance degradation detected!")
-                print(f"   💡 Investigate: memory leaks, resource exhaustion, network issues")
-            elif degradation > 10:
-                print(f"   ⚠️  Moderate performance degradation")
-                print(f"   💡 Monitor: check for gradual resource consumption")
-            elif degradation < -10:
-                print(f"   🚀 Performance improvement detected")
-                print(f"   💡 System may have warmed up or optimized")
-            else:
-                print(f"   ✅ Stable performance throughout test")
-        
-        # Connection Analysis
-        conn_metrics = self.performance_metrics['connection_metrics']
-        if conn_metrics['total_connections'] > 0:
-            print(f"\n🔗 Connection Analysis:")
-            conn_success_rate = ((conn_metrics['total_connections'] - conn_metrics['failed_connections']) / 
-                               conn_metrics['total_connections'] * 100)
-            print(f"   Connection success rate: {conn_success_rate:.1f}%")
-            print(f"   Failed connections: {conn_metrics['failed_connections']}")
-            print(f"   Reconnections: {conn_metrics['reconnections']}")
-            
-            if conn_metrics['connection_times']:
-                avg_conn_time = sum(conn_metrics['connection_times']) / len(conn_metrics['connection_times'])
-                print(f"   Average connection time: {avg_conn_time:.1f} ms")
-        
-        # SLA Violations Summary
-        violations = self.performance_metrics['latency_sla_violations']
-        total_requests = sum(violations.values()) if violations else 0
-        
-        if total_requests > 0:
-            print(f"\n🚨 SLA Violation Summary:")
-            print(f"   Total requests with violations: {total_requests}")
-            for threshold, count in violations.items():
-                if count > 0:
-                    percentage = (count / total_requests) * 100
-                    print(f"   > {threshold}: {count} requests ({percentage:.1f}%)")
-        
-        # Performance Recommendations
-        print(f"\n💡 Performance Recommendations:")
-        
-        if latency_analysis:
-            if latency_analysis['jitter_percent'] > 30:
-                print(f"   🔧 High latency jitter detected - check network stability")
-            
-            if latency_analysis['percentiles'].get('p99', 0) > 1000:
-                print(f"   🔧 Very high tail latencies - investigate slow queries/operations")
-            
-            if latency_analysis['consistency_score'] < 70:
-                print(f"   🔧 Poor latency consistency - consider load balancing improvements")
-        
-        if degradation and degradation > 15:
-            print(f"   🔧 Performance degradation detected - investigate resource leaks")
-        
-        conn_success_rate = 100
-        if conn_metrics['total_connections'] > 0:
-            conn_success_rate = ((conn_metrics['total_connections'] - conn_metrics['failed_connections']) / 
-                               conn_metrics['total_connections'] * 100)
-        
-        if conn_success_rate < 99:
-            print(f"   🔧 Connection reliability issues - check network/server capacity")
-        
-        # Overall System Health Score
-        health_factors = []
-        
-        if latency_analysis:
-            # Latency health (0-100)
-            p95_health = max(0, 100 - (latency_analysis['percentiles'].get('p95', 0) / 5))  # 500ms = 0 health
-            health_factors.append(('Latency', min(100, p95_health)))
-            
-            # Consistency health
-            health_factors.append(('Consistency', latency_analysis['consistency_score']))
-        
-        # Success rate health
-        total_messages = self.stats['messages_sent'] + self.stats['messages_failed']
-        if total_messages > 0:
-            success_rate = (self.stats['messages_sent'] / total_messages) * 100
-            health_factors.append(('Success Rate', success_rate))
-        
-        # Connection health
-        health_factors.append(('Connection Health', conn_success_rate))
-        
-        if health_factors:
-            overall_health = sum(factor[1] for factor in health_factors) / len(health_factors)
-            print(f"\n📊 System Health Score: {overall_health:.1f}/100")
-            
-            for factor_name, score in health_factors:
-                status = "🟢" if score >= 90 else "🟡" if score >= 70 else "🔴"
-                print(f"   {status} {factor_name}: {score:.1f}/100")
-            
-            if overall_health >= 90:
-                print(f"   ✅ Excellent system health")
-            elif overall_health >= 80:
-                print(f"   ✅ Good system health")
-            elif overall_health >= 70:
-                print(f"   ⚠️  Fair system health - room for improvement")
-            else:
-                print(f"   🚨 Poor system health - requires attention")
-        
-        print("="*80)
+        # Record status code
+        self.performance_metrics['response_codes'][status_code] = self.performance_metrics['response_codes'].get(status_code, 0) + 1
 
-    # Update the existing record_message_metrics method
-    def record_message_metrics(self, protocol: str, response_time_ms: float, 
-                              response_code: int, message_size_bytes: int):
-        """Record detailed metrics for each message sent."""
-        # Record response time and latency metrics
-        self.performance_metrics['response_times'].append(response_time_ms)
-        self.record_latency_metrics(response_time_ms)
+        # Record data transferred
+        if message_size_bytes > 0:
+            self.performance_metrics['data_transferred']['total_bytes'] += message_size_bytes
+            # Assuming request/response distinction might be added later or is part of message_size_bytes
+            if success: # Simplistic: count towards request if successful, could be more nuanced
+                 self.performance_metrics['data_transferred']['request_bytes'] += message_size_bytes
+            
+            self.performance_metrics['data_transferred']['min_message_size'] = min(
+                self.performance_metrics['data_transferred']['min_message_size'], message_size_bytes
+            )
+            self.performance_metrics['data_transferred']['max_message_size'] = max(
+                self.performance_metrics['data_transferred']['max_message_size'], message_size_bytes
+            )
         
-        # Record response code
-        if response_code not in self.performance_metrics['response_codes']:
-            self.performance_metrics['response_codes'][response_code] = 0
-        self.performance_metrics['response_codes'][response_code] += 1
-        
-        # Record data transfer
-        self.performance_metrics['data_transferred']['total_bytes'] += message_size_bytes
-        self.performance_metrics['data_transferred']['request_bytes'] += message_size_bytes
-        self.performance_metrics['data_transferred']['min_message_size'] = min(
-            self.performance_metrics['data_transferred']['min_message_size'], message_size_bytes)
-        self.performance_metrics['data_transferred']['max_message_size'] = max(
-            self.performance_metrics['data_transferred']['max_message_size'], message_size_bytes)
-        
-        # Per-protocol metrics
+        # Per-protocol performance (can be expanded)
         if protocol not in self.performance_metrics['protocol_performance']:
             self.performance_metrics['protocol_performance'][protocol] = {
-                'response_times': [],
-                'response_codes': {},
-                'data_transferred': 0,
-                'connect_times': [],  # Connection establishment times
-                'publish_times': [],  # Time to publish/send
-                'ack_times': []       # Acknowledgment times (for MQTT QoS 1/2)
+                'latencies': [],
+                'status_codes': {}
             }
-        
-        self.performance_metrics['protocol_performance'][protocol]['response_times'].append(response_time_ms)
-        
-        if response_code not in self.performance_metrics['protocol_performance'][protocol]['response_codes']:
-            self.performance_metrics['protocol_performance'][protocol]['response_codes'][response_code] = 0
-        self.performance_metrics['protocol_performance'][protocol]['response_codes'][response_code] += 1
-        
-        self.performance_metrics['protocol_performance'][protocol]['data_transferred'] += message_size_bytes
+        self.performance_metrics['protocol_performance'][protocol]['latencies'].append(response_time_ms)
+        self.performance_metrics['protocol_performance'][protocol]['status_codes'][status_code] = \
+            self.performance_metrics['protocol_performance'][protocol]['status_codes'].get(status_code, 0) + 1
 
-    def record_connection_metrics(self, success: bool, connection_time_ms: float = 0):
-        """Record connection-level metrics."""
-        self.performance_metrics['connection_metrics']['total_connections'] += 1
-        
-        if not success:
-            self.performance_metrics['connection_metrics']['failed_connections'] += 1
-        else:
-            if connection_time_ms > 0:
-                self.performance_metrics['connection_metrics']['connection_times'].append(connection_time_ms)
+    def record_message_sent(self, protocol: str):
+        """Record a successful message send."""
+        self.stats['messages_sent'] += 1
+        if protocol in self.protocol_stats:
+            self.protocol_stats[protocol]['messages_sent'] += 1
 
-    def record_reconnection(self):
-        """Record a reconnection event."""
-        self.performance_metrics['connection_metrics']['reconnections'] += 1
+    def record_message_failed(self, protocol: str):
+        """Record a failed message send."""
+        self.stats['messages_failed'] += 1
+        if protocol in self.protocol_stats:
+            self.protocol_stats[protocol]['messages_failed'] += 1
 
-    # Update monitor_stats to include real-time latency tracking
     def monitor_stats(self):
         """Monitor and print statistics during load testing."""
         def stats_monitor():
             last_sent = 0
+            last_failed = 0 # Track last failed to calculate rate of failures too
             last_time = time.time()
             
             while self.running:
                 time.sleep(10)  # Print stats every 10 seconds
+                if not self.running: # Check again after sleep, in case test stopped
+                    break
+
                 current_time = time.time()
-                current_sent = self.stats['messages_sent']
-                elapsed = current_time - last_time
+                current_sent_total = self.stats['messages_sent']
+                current_failed_total = self.stats['messages_failed']
                 
-                # Calculate message rate
-                rate = (current_sent - last_sent) / elapsed if elapsed > 0 else 0
+                elapsed = current_time - last_time
+                if elapsed <= 0: # Avoid division by zero if time hasn't advanced
+                    elapsed = 1 # Assume 1 second to prevent error, or skip update
+
+                # Calculate message rate for this interval
+                interval_sent = current_sent_total - last_sent
+                interval_failed = current_failed_total - last_failed
+                
+                sent_rate = interval_sent / elapsed
+                failed_rate = interval_failed / elapsed
                 
                 # Get real-time latency stats
-                latency_stats = self.get_real_time_latency_stats()
+                latency_stats_dict = self.get_real_time_latency_stats()
                 
                 # Store time series data for reporting
                 self.time_series_data['timestamps'].append(datetime.datetime.now())
-                self.time_series_data['messages_sent'].append(current_sent)
-                self.time_series_data['messages_failed'].append(self.stats['messages_failed'])
-                self.time_series_data['msg_rate'].append(rate)
+                self.time_series_data['messages_sent'].append(current_sent_total) # Store cumulative
+                self.time_series_data['messages_failed'].append(current_failed_total) # Store cumulative
+                self.time_series_data['msg_rate'].append(sent_rate) # Store interval rate
                 
-                if latency_stats:
-                    self.time_series_data['avg_latency'].append(latency_stats['current_avg'])
-                    self.time_series_data['latency_95th'].append(latency_stats['percentiles'].get('p95', 0))
-                    self.time_series_data['latency_99th'].append(latency_stats['percentiles'].get('p99', 0))
+                latency_info_str = ""
+                if latency_stats_dict:
+                    self.time_series_data['avg_latency'].append(latency_stats_dict.get('current_avg', 0))
+                    self.time_series_data['latency_95th'].append(latency_stats_dict.get('percentiles', {}).get('p95', 0))
+                    self.time_series_data['latency_99th'].append(latency_stats_dict.get('percentiles', {}).get('p99', 0))
+                    latency_info_str = (f", Avg Lat: {latency_stats_dict.get('current_avg', 0):.1f}ms, "
+                                        f"P95: {latency_stats_dict.get('percentiles', {}).get('p95', 0):.1f}ms, "
+                                        f"P99: {latency_stats_dict.get('percentiles', {}).get('p99', 0):.1f}ms")
                 else:
                     self.time_series_data['avg_latency'].append(0)
                     self.time_series_data['latency_95th'].append(0)
                     self.time_series_data['latency_99th'].append(0)
                 
-                # Log current stats with latency info
-                latency_info = ""
-                if latency_stats:
-                    latency_info = f", Avg Latency: {latency_stats['current_avg']:.1f}ms, P95: {latency_stats['percentiles'].get('p95', 0):.1f}ms"
-                
                 self.logger.info(
-                    f"Stats - Sent: {current_sent}, Failed: {self.stats['messages_failed']}, "
-                    f"Rate: {rate:.1f} msg/s{latency_info}"
+                    f"Stats - Sent: {current_sent_total} ({sent_rate:.1f}/s), "
+                    f"Failed: {current_failed_total} ({failed_rate:.1f}/s)"
+                    f"{latency_info_str}"
                 )
                 
                 # Update for next interval
-                last_sent = current_sent
+                last_sent = current_sent_total
+                last_failed = current_failed_total
                 last_time = current_time
         
-        stats_thread = threading.Thread(target=stats_monitor)
-        stats_thread.daemon = True
+        # Ensure the thread is only started if it's not already running or if it's properly managed
+        # For simplicity, assuming it's started once per test run.
+        # If monitor_stats can be called multiple times, thread management needs to be more robust.
+        stats_thread = threading.Thread(target=stats_monitor, name="StatsMonitorThread")
+        stats_thread.daemon = True # Ensure thread doesn't block program exit
         stats_thread.start()
-
-    # Update the print_final_stats method to include advanced findings
-    def print_final_stats(self):
-        """Print final statistics (enhanced version)."""
-        self.print_enhanced_final_stats()
-        self.print_advanced_findings()
