@@ -3,7 +3,7 @@ version: '3.8'
 services:
   registrar:
     build: .
-    command: python /app/registrar/main.py
+    command: python /app/docker-services/registrar_service.py
     environment:
       - SERVICE_NAME=registrar
       - TENANT_COUNT=${TENANT_COUNT:-5}
@@ -21,7 +21,7 @@ services:
 
   validator:
     build: .
-    command: python /app/validator/main.py
+    command: python /app/docker-services/validator_service.py
     environment:
       - SERVICE_NAME=validator
     env_file:
@@ -37,7 +37,7 @@ services:
 
   loadgen:
     build: .
-    command: python /app/loadgen/main.py
+    command: python /app/docker-services/loadgen_service.py
     environment:
       - SERVICE_NAME=loadgen
       - PROTOCOLS=${PROTOCOLS:-mqtt}

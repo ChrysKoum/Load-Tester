@@ -7,7 +7,7 @@ This document describes the refactored modular architecture of the Hono Load Tes
 ```
 python-script/
 ├── stress.py                     # Original monolithic file (preserved)
-├── stress_refactored.py          # New main entry point
+├── stress.py          # New main entry point
 ├── requirements.txt              # Dependencies
 ├── README.md                     # This documentation
 ├── config/                       # Configuration modules
@@ -55,16 +55,16 @@ The refactored version maintains the same command-line interface:
 
 ```bash
 # Run with default settings (10 devices, MQTT, 5.75s interval)
-python stress_refactored.py
+python stress.py
 
 # Run tiny test (2 tenants, 2 devices)
-python stress_refactored.py --tiny
+python stress.py --tiny
 
 # Run with custom settings
-python stress_refactored.py --mode custom --devices 50 --interval 30 --protocols mqtt http
+python stress.py --mode custom --devices 50 --interval 30 --protocols mqtt http
 
 # Generate detailed reports
-python stress_refactored.py --report --report-dir ./my-reports
+python stress.py --report --report-dir ./my-reports
 ```
 
 ### Import and Use Programmatically
@@ -131,7 +131,7 @@ The original `stress.py` file is preserved and fully functional. The refactored 
 
 ```bash
 # Syntax check all modules
-python -m py_compile stress_refactored.py
+python -m py_compile stress.py
 python -m py_compile config/hono_config.py
 python -m py_compile models/device.py
 python -m py_compile core/load_tester.py
@@ -141,7 +141,7 @@ python -m py_compile core/reporting.py
 python -m py_compile utils/constants.py
 
 # Run a quick test
-python stress_refactored.py --tiny --setup-only
+python stress.py --tiny --setup-only
 ```
 
 ## 📈 Future Enhancements

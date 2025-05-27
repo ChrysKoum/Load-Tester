@@ -12,13 +12,16 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
-COPY registrar/ ./registrar/
-COPY validator/ ./validator/
-COPY loadgen/ ./loadgen/
+# Copy the working python-script-organize code structure
+COPY python-script-organize/ ./
+
+# Copy Docker-specific service entry points
+COPY docker-services/ ./docker-services/
+
+# Copy shared utilities
 COPY shared/ ./shared/
 
-# Create shared directory
+# Create shared directory for data exchange between services
 RUN mkdir -p /app/shared && chmod 777 /app/shared
 
 # Default command (will be overridden by docker-compose)
