@@ -1,0 +1,69 @@
+{{- if .Values.registrar.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "hono-load-test.fullname" . }}-registrar
+  labels:
+    {{- include "hono-load-test.labels" . | nindent 4 }}
+    app.kubernetes.io/component: registrar
+spec:
+  template:
+    metadata:
+      labels:
+        {{- include "hono-load-test.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: registrar
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "hono-load-test.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.securityContext | nindent 8 }}
+      restartPolicy: {{ .Values.registrar.restartPolicy }}
+      containers:
+      - name: registrar
+        image: {{ .Values.registrar.image.repository | default .Values.image.repository }}:{{ .Values.registrar.image.tag | default .Values.image.tag }}
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        command: ["python", "/app/registrar/main.py"]
+        env:
+        - name: SERVICE_MODE
+          value: "registrar"
+        envFrom:
+        - configMapRef:
+            name: {{ include "hono-load-test.fullname" . }}-config
+        volumeMounts:
+        - name: shared-data
+          mountPath: /shared-data
+        {{- if .Values.persistence.enabled }}
+        - name: hono-config
+          mountPath: /app/hono.env
+          subPath: hono.env
+        {{- end }}
+        resources:
+          {{- toYaml .Values.registrar.resources | nindent 10 }}
+      volumes:
+      {{- if .Values.persistence.enabled }}
+      - name: shared-data
+        persistentVolumeClaim:
+          claimName: {{ include "hono-load-test.pvcName" . }}
+      {{- else }}
+      - name: shared-data
+        emptyDir: {}
+      {{- end }}
+      - name: hono-config
+        configMap:
+          name: {{ include "hono-load-test.fullname" . }}-config
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

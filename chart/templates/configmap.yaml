@@ -1,0 +1,35 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "hono-load-test.fullname" . }}-config
+  labels:
+    {{- include "hono-load-test.labels" . | nindent 4 }}
+data:
+  hono.env: |
+    # Hono Eclipse IoT endpoints configuration
+    HONO_REGISTRY_IP={{ .Values.hono.registryIp }}
+    HONO_REGISTRY_PORT={{ .Values.hono.registryPort }}
+    HONO_HTTP_ADAPTER_IP={{ .Values.hono.httpAdapterIp }}
+    HONO_HTTP_ADAPTER_PORT={{ .Values.hono.httpAdapterPort }}
+    HONO_MQTT_ADAPTER_IP={{ .Values.hono.mqttAdapterIp }}
+    HONO_MQTT_ADAPTER_PORT={{ .Values.hono.mqttAdapterPort }}
+    HONO_COAP_ADAPTER_IP={{ .Values.hono.coapAdapterIp }}
+    HONO_COAP_ADAPTER_PORT={{ .Values.hono.coapAdapterPort }}
+    HONO_AMQP_ADAPTER_IP={{ .Values.hono.amqpAdapterIp }}
+    HONO_AMQP_ADAPTER_PORT={{ .Values.hono.amqpAdapterPort }}
+    HONO_LORA_ADAPTER_IP={{ .Values.hono.loraAdapterIp }}
+    HONO_LORA_ADAPTER_PORT={{ .Values.hono.loraAdapterPort }}
+    USE_TLS={{ .Values.hono.useTls }}
+    VERIFY_SSL={{ .Values.hono.verifySsl }}
+    MESSAGING_TYPE={{ .Values.hono.messagingType }}
+    
+    # Test configuration
+    TENANT_COUNT={{ .Values.test.tenantCount }}
+    DEVICE_COUNT={{ .Values.test.deviceCount }}
+    PROTOCOLS={{ .Values.test.protocols }}
+    MESSAGE_TYPE={{ .Values.test.messageType }}
+    MESSAGE_INTERVAL={{ .Values.test.messageInterval }}
+    LOG_LEVEL={{ .Values.logging.level }}
+    
+    # Internal service coordination
+    SHARED_DATA_PATH=/shared-data

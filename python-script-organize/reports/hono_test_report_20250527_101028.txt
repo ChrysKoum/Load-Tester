@@ -1,0 +1,44 @@
+============================================================
+HONO LOAD TEST DETAILED REPORT
+============================================================
+
+Test Date: 2025-05-27 10:10:22
+Test Duration: 5.25 seconds
+
+CONFIGURATION
+----------------------------------------
+Registry: 192.168.1.4:28443
+MQTT Adapter: 192.168.1.4:8883
+HTTP Adapter: 192.168.1.4:8443
+MQTT TLS: True
+HTTP TLS: True
+
+TEST INFRASTRUCTURE
+----------------------------------------
+Tenants: 2
+Devices: 2
+Devices per Tenant: 1.0
+
+VALIDATION RESULTS
+----------------------------------------
+Validation Success: 2
+Validation Failed: 0
+Validation Rate: 100.0%
+
+LOAD TEST RESULTS
+----------------------------------------
+Messages Sent: 0
+Messages Failed: 2
+Success Rate: 0.0%
+Average Message Rate: 0.00 messages/second
+
+PROTOCOL BREAKDOWN
+----------------------------------------
+Protocol: MQTT
+  Devices: 2
+  Messages Sent: 0
+  Messages Failed: 0
+  Success Rate: 100.0%
+
+============================================================
+Report generated at: 2025-05-27 10:10:28

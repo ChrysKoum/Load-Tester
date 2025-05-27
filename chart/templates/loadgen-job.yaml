@@ -1,0 +1,87 @@
+{{- if .Values.loadgen.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "hono-load-test.fullname" . }}-loadgen
+  labels:
+    {{- include "hono-load-test.labels" . | nindent 4 }}
+    app.kubernetes.io/component: loadgen
+spec:
+  parallelism: {{ .Values.loadgen.replicas }}
+  template:
+    metadata:
+      labels:
+        {{- include "hono-load-test.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: loadgen
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "hono-load-test.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.securityContext | nindent 8 }}
+      restartPolicy: {{ .Values.loadgen.restartPolicy }}
+      initContainers:
+      - name: wait-for-validator
+        image: busybox:1.35
+        command: ['sh', '-c']
+        args:
+        - |
+          echo "Waiting for validator to complete..."
+          while [ ! -f /shared-data/validation-complete.json ]; do
+            echo "Waiting for validation-complete.json..."
+            sleep 10
+          done
+          echo "Validator completed, starting load generation"
+        volumeMounts:
+        - name: shared-data
+          mountPath: /shared-data
+      containers:
+      - name: loadgen
+        image: {{ .Values.loadgen.image.repository | default .Values.image.repository }}:{{ .Values.loadgen.image.tag | default .Values.image.tag }}
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        command: ["python", "/app/loadgen/main.py"]
+        env:
+        - name: SERVICE_MODE
+          value: "loadgen"
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        envFrom:
+        - configMapRef:
+            name: {{ include "hono-load-test.fullname" . }}-config
+        volumeMounts:
+        - name: shared-data
+          mountPath: /shared-data
+        - name: hono-config
+          mountPath: /app/hono.env
+          subPath: hono.env
+        resources:
+          {{- toYaml .Values.loadgen.resources | nindent 10 }}
+      volumes:
+      {{- if .Values.persistence.enabled }}
+      - name: shared-data
+        persistentVolumeClaim:
+          claimName: {{ include "hono-load-test.pvcName" . }}
+      {{- else }}
+      - name: shared-data
+        emptyDir: {}
+      {{- end }}
+      - name: hono-config
+        configMap:
+          name: {{ include "hono-load-test.fullname" . }}-config
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

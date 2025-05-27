@@ -1,0 +1,80 @@
+version: '3.8'
+
+services:
+  registrar:
+    build: .
+    command: python /app/registrar/main.py
+    environment:
+      - SERVICE_NAME=registrar
+      - TENANT_COUNT=${TENANT_COUNT:-5}
+      - DEVICE_COUNT=${DEVICE_COUNT:-10}
+    env_file:
+      - .env
+      - hono.env
+    volumes:
+      - shared_data:/app/shared
+    networks:
+      - hono-test
+    depends_on:
+      - setup-shared-volume
+    restart: unless-stopped
+
+  validator:
+    build: .
+    command: python /app/validator/main.py
+    environment:
+      - SERVICE_NAME=validator
+    env_file:
+      - .env
+      - hono.env
+    volumes:
+      - shared_data:/app/shared
+    networks:
+      - hono-test
+    depends_on:
+      - registrar
+    restart: unless-stopped
+
+  loadgen:
+    build: .
+    command: python /app/loadgen/main.py
+    environment:
+      - SERVICE_NAME=loadgen
+      - PROTOCOLS=${PROTOCOLS:-mqtt}
+      - MESSAGE_TYPE=${MESSAGE_TYPE:-telemetry}
+      - MESSAGE_INTERVAL=${MESSAGE_INTERVAL:-10}
+    env_file:
+      - .env
+      - hono.env
+    volumes:
+      - shared_data:/app/shared
+    networks:
+      - hono-test
+    depends_on:
+      - validator
+    restart: unless-stopped
+    deploy:
+      replicas: ${LOADGEN_REPLICAS:-1}
+
+  # Helper service to create shared volume with proper permissions
+  setup-shared-volume:
+    image: busybox
+    command: |
+      sh -c "
+        mkdir -p /app/shared &&
+        chmod 777 /app/shared &&
+        touch /app/shared/tenants.json /app/shared/devices.json /app/shared/status.json &&
+        chmod 666 /app/shared/*.json
+      "
+    volumes:
+      - shared_data:/app/shared
+    networks:
+      - hono-test
+
+volumes:
+  shared_data:
+    driver: local
+
+networks:
+  hono-test:
+    driver: bridge

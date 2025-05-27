@@ -1,0 +1,126 @@
+# Default values for hono-load-test
+# This is a YAML-formatted file.
+
+# Global configuration
+global:
+  imagePullSecrets: []
+  
+# Test configuration
+test:
+  tenantCount: 5
+  deviceCount: 100
+  protocols: "mqtt,http"
+  messageType: "telemetry"  # telemetry or event
+  messageInterval: 10  # seconds
+  
+# Hono endpoints configuration
+hono:
+  registryIp: "hono.eclipseprojects.io"
+  registryPort: 28443
+  httpAdapterIp: "hono.eclipseprojects.io"
+  httpAdapterPort: 8443
+  mqttAdapterIp: "hono.eclipseprojects.io"
+  mqttAdapterPort: 8883
+  coapAdapterIp: "hono.eclipseprojects.io"
+  coapAdapterPort: 5684
+  amqpAdapterIp: "hono.eclipseprojects.io"
+  amqpAdapterPort: 5671
+  loraAdapterIp: "hono.eclipseprojects.io"
+  loraAdapterPort: 8080
+  useTls: true
+  verifySsl: false
+  messagingType: "kafka"
+
+# Image configuration
+image:
+  repository: yourrepo/hono-load-test
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# Service configuration
+registrar:
+  enabled: true
+  image:
+    repository: ""  # Uses global image.repository if empty
+    tag: ""  # Uses global image.tag if empty
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+  restartPolicy: Never
+
+validator:
+  enabled: true
+  image:
+    repository: ""  # Uses global image.repository if empty
+    tag: ""  # Uses global image.tag if empty
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+  restartPolicy: Never
+
+loadgen:
+  enabled: true
+  replicas: 1
+  image:
+    repository: ""  # Uses global image.repository if empty
+    tag: ""  # Uses global image.tag if empty
+  resources:
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+    requests:
+      cpu: 200m
+      memory: 256Mi
+  restartPolicy: Never
+
+# Storage configuration
+persistence:
+  enabled: true
+  accessMode: ReadWriteOnce
+  size: 1Gi
+  storageClass: ""  # Use default storage class
+
+# Security context
+securityContext:
+  fsGroup: 1000
+  runAsUser: 1000
+  runAsGroup: 1000
+
+# Node selection
+nodeSelector: {}
+
+# Tolerations
+tolerations: []
+
+# Affinity
+affinity: {}
+
+# Service account
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+# Logging configuration
+logging:
+  level: INFO
+
+# Monitoring (optional)
+monitoring:
+  enabled: false
+  serviceMonitor:
+    enabled: false
+    namespace: ""
+    labels: {}
+
+# Network policies
+networkPolicy:
+  enabled: false
