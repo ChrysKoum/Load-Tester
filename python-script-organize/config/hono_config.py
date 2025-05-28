@@ -37,6 +37,7 @@ class HonoConfig:
     mosquitto_options: str = "--insecure"
     http_timeout: int = 30
     mqtt_keepalive: int = 60
+    mqtt_connect_timeout: int = 10  # MQTT connection timeout in seconds
     
     # Add explicit tenant/device options
     my_tenant: Optional[str] = None
@@ -100,12 +101,12 @@ async def load_config_from_env(config: HonoConfig, env_file: str = "hono.env") -
     config.use_mqtt_tls = os.getenv('USE_MQTT_TLS', os.getenv('USE_TLS', 'true')).lower() == 'true'
     config.verify_ssl = os.getenv('VERIFY_SSL', 'false').lower() == 'true'
     config.ca_file_path = os.getenv('CA_FILE_PATH')
-    
-    # Client options
+      # Client options
     config.curl_options = os.getenv('CURL_OPTIONS', config.curl_options)
     config.mosquitto_options = os.getenv('MOSQUITTO_OPTIONS', config.mosquitto_options)
     config.http_timeout = int(os.getenv('HTTP_TIMEOUT', config.http_timeout))
     config.mqtt_keepalive = int(os.getenv('MQTT_KEEPALIVE', config.mqtt_keepalive))
+    config.mqtt_connect_timeout = int(os.getenv('MQTT_CONNECT_TIMEOUT', config.mqtt_connect_timeout))
     
     # Existing tenant/device configuration
     config.my_tenant = os.getenv('MY_TENANT')

@@ -43,11 +43,13 @@ class ProtocolWorkers:
     def _update_stats(self, protocol_key: str, success: bool, message_count_increment: int = 1):
         """Helper to update general and protocol-specific stats."""
         if success:
-            self.stats['messages_sent'] += message_count_increment
-            self.protocol_stats[protocol_key]['messages_sent'] += message_count_increment
+            self.shared_stats['messages_sent'] += message_count_increment
+            if protocol_key in self.protocol_stats:
+                self.protocol_stats[protocol_key]['messages_sent'] += message_count_increment
         else:
-            self.stats['messages_failed'] += message_count_increment # Assuming one failure means one message attempt failed
-            self.protocol_stats[protocol_key]['messages_failed'] += message_count_increment
+            self.shared_stats['messages_failed'] += message_count_increment # Assuming one failure means one message attempt failed
+            if protocol_key in self.protocol_stats:
+                self.protocol_stats[protocol_key]['messages_failed'] += message_count_increment
 
     def _get_mqtt_ssl_context(self) -> Optional[ssl.SSLContext]:
         """Creates and configures an SSLContext for MQTT TLS connections."""
@@ -59,25 +61,24 @@ class ProtocolWorkers:
             # It automatically chooses the highest protocol version that both client and server support,
             # and enables hostname checking and certificate validation by default.
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-            context.minimum_version = ssl.TLSVersion.TLSv1_2 # Enforce TLSv1.2 or higher
-
-            if self.config.ca_file_path and os.path.exists(self.config.ca_file_path):
+            context.minimum_version = ssl.TLSVersion.TLSv1_2 # Enforce TLSv1.2 or higher            # Check verify_ssl configuration first
+            if not self.config.verify_ssl:
+                context.check_hostname = False
+                context.verify_mode = ssl.CERT_NONE
+                self.logger.warning("MQTT SSLContext: SSL verification disabled. Server certificate WILL NOT be verified.")
+            elif self.config.ca_file_path and os.path.exists(self.config.ca_file_path):
                 context.load_verify_locations(cafile=self.config.ca_file_path)
                 context.verify_mode = ssl.CERT_REQUIRED
                 context.check_hostname = True # Explicitly ensure hostname checking
                 self.logger.debug(f"MQTT SSLContext: Loaded CA file '{self.config.ca_file_path}'. Server certificate will be verified.")
-            elif self.config.mqtt_allow_system_cas: # New config option
+            elif hasattr(self.config, 'mqtt_allow_system_cas') and self.config.mqtt_allow_system_cas: # New config option
                 # Uses system's trusted CAs. Hostname checking and cert validation are on by default.
                 self.logger.debug("MQTT SSLContext: Using system's default CA certificates. Server certificate will be verified.")
-            elif self.config.mqtt_allow_insecure_tls: # New config option for explicitly allowing insecure
+            else:
+                # Default: disable verification if no CA file and verify_ssl is not explicitly set
                 context.check_hostname = False
                 context.verify_mode = ssl.CERT_NONE
-                self.logger.warning("MQTT SSLContext: Insecure TLS connection. Server certificate WILL NOT be verified. THIS IS NOT RECOMMENDED FOR PRODUCTION.")
-            else:
-                # Default secure: if use_mqtt_tls is True but no CA is provided and system CAs are not explicitly allowed,
-                # this will likely fail unless the server cert is issued by a public CA already in the default trust store.
-                # Or, raise an error if a stricter policy is desired when no CA is specified.
-                self.logger.warning("MQTT SSLContext: TLS enabled but no CA file specified and system CAs not explicitly allowed. Relying on default trust store. Verification might fail if server uses a private CA.")
+                self.logger.warning("MQTT SSLContext: No CA file specified and verify_ssl disabled. Server certificate will not be verified.")
             return context
         except ssl.SSLError as e:
             self.logger.error(f"MQTT SSLContext: Failed to create/load SSL context: {e}. MQTT TLS connection will likely fail.")
@@ -89,13 +90,12 @@ class ProtocolWorkers:
 
     def mqtt_telemetry_worker(self, device: Device, message_interval: float, protocol_name: str = "telemetry"):
         """Worker function for MQTT telemetry publishing."""
-        mqtt_protocol_key = 'mqtt' # For stats
+        mqtt_protocol_key = 'mqtt'
         if mqtt_protocol_key not in self.protocol_stats:
             self.logger.error("MQTT protocol stats not initialized!")
             return
-        self.protocol_stats[mqtt_protocol_key]['devices'] += 1
-
-        client = mqtt.Client(client_id=device.device_id) # Using device_id as client_id
+        
+        client = mqtt.Client(client_id=device.device_id)
         client.username_pw_set(f"{device.auth_id}@{device.tenant_id}", device.password)
 
         mqtt_host = self.config.mqtt_adapter_ip
@@ -204,9 +204,7 @@ class ProtocolWorkers:
                     self._update_stats(mqtt_protocol_key, success=False)
                     # Decide if to break loop on publish failure or continue
                     # if not msg_info.is_published(): # Additional check for QoS 1/2 if not waiting
-                    #     self.logger.warning(f"MQTT message for {device.device_id} may not have been sent (mid={msg_info.mid})")
-
-                if not self.running or not connected_flag: # Re-check running and connection status before sleep
+                    #     self.logger.warning(f"MQTT message for {device.device_id} may not have been sent (mid={msg_info.mid})")                if not self.running or not connected_flag: # Re-check running and connection status before sleep
                     break
                 time.sleep(message_interval)
 
@@ -226,7 +224,7 @@ class ProtocolWorkers:
             try:
                 if client.is_connected(): # is_connected() might not be fully reliable after loop_stop
                     client.disconnect()
-                client.loop_stop(force=False) # Allow pending messages to clear if possible
+                client.loop_stop() # Stop the network loop
                 self.logger.debug(f"MQTT client resources released for device {device.device_id}")
             except Exception as e_finally:
                 self.logger.error(f"Error during MQTT worker cleanup for {device.device_id}: {e_finally}")
@@ -262,131 +260,102 @@ class ProtocolWorkers:
             return None
 
 
-    async def http_telemetry_worker(self, device: Device, message_interval: float, protocol_name: str = "telemetry"): # Renamed 'protocol' to 'protocol_name'
-        """Worker function for HTTP telemetry publishing."""
-        http_protocol_key = 'http' # For stats
-        self.protocol_stats[http_protocol_key]['devices'] += 1
+    async def http_telemetry_worker(self, device: Device, message_interval: float, message_type: str = "telemetry"):
+        http_protocol_key = "http" 
 
-        ssl_context = await self._get_http_ssl_context() # Make it async if it ever needs async ops
+        self.logger.debug(f"HTTP worker started for device {device.device_id}")
+
+        if http_protocol_key not in self.protocol_stats:
+            self.logger.error(f"Critical: Key '{http_protocol_key}' not found in protocol_stats for HTTP worker.")
+            self.protocol_stats[http_protocol_key] = {'messages_sent': 0, 'messages_failed': 0, 'devices': 0}
+        
+        # Create SSL context
+        # Assuming _get_http_ssl_context() is defined and returns a valid SSLContext or None
+        ssl_context = await self._get_http_ssl_context()
+
 
         # Determine scheme and port based on TLS configuration
-        if self.config.use_tls: # General TLS config, or specific self.config.use_http_tls
+        if self.config.use_tls:
             protocol_scheme = "https"
-            port = self.config.http_adapter_port # Assuming this is the TLS port for HTTP adapter
+            port = self.config.http_adapter_port
         else:
             protocol_scheme = "http"
-            port = self.config.http_insecure_port # Assuming this is the non-TLS port
+            port = self.config.http_insecure_port
 
-        url = f"{protocol_scheme}://{self.config.http_adapter_ip}:{port}/{protocol_name}" # Use protocol_name for path
-
-        connector = aiohttp.TCPConnector(ssl=ssl_context if self.config.use_tls else False) # Pass False if not using TLS
+        url = f"{protocol_scheme}://{self.config.http_adapter_ip}:{port}/{message_type}"
+        
+        connector = aiohttp.TCPConnector(ssl=ssl_context if self.config.use_tls and ssl_context else False)
         timeout_config = aiohttp.ClientTimeout(total=self.config.http_timeout)
 
         async with aiohttp.ClientSession(connector=connector, timeout=timeout_config) as session:
             headers = {"Content-Type": "application/json"}
-            # Ensure auth_id is used for HTTP Basic Auth username part
             auth = aiohttp.BasicAuth(f"{device.auth_id}@{device.tenant_id}", device.password)
 
             message_count = 0
             while self.running:
                 payload_data = {
-                    "device_id": device.device_id, "tenant_id": device.tenant_id, "timestamp": int(time.time()),
-                    "message_count": message_count, "protocol": "http",
-                    "temperature": round(random.uniform(18.0, 35.0), 2), "humidity": round(random.uniform(30.0, 90.0), 2),
-                    "pressure": round(random.uniform(980.0, 1030.0), 2), "battery": round(random.uniform(20.0, 100.0), 2),
+                    "device_id": device.device_id,
+                    "tenant_id": device.tenant_id,
+                    "timestamp": int(time.time()),
+                    "message_count": message_count,
+                    "protocol": "http",
+                    "temperature": round(random.uniform(18.0, 35.0), 2),
+                    "humidity": round(random.uniform(30.0, 90.0), 2),
+                    "pressure": round(random.uniform(980.0, 1030.0), 2),
+                    "battery": round(random.uniform(20.0, 100.0), 2),
                     "signal_strength": random.randint(-100, -30)
                 }
-                payload_json_str = json.dumps(payload_data)
-                message_size_bytes = len(payload_json_str.encode('utf-8'))
-
-                start_time = time.monotonic()
-                response_status_code = 500 # Default to error
+                payload_json = json.dumps(payload_data)
+                message_size_bytes = len(payload_json.encode('utf-8'))
 
                 try:
-                    async with session.post(url, data=payload_json_str, headers=headers, auth=auth) as response:
+                    start_time = time.monotonic()
+                    async with session.post(url, data=payload_json, headers=headers, auth=auth) as response:
                         end_time = time.monotonic()
                         response_time_ms = (end_time - start_time) * 1000
-                        response_status_code = response.status
+                        
+                        is_successful = response.status < 400 # Treat 2xx and 3xx as success
 
                         if self.reporting_manager:
                             self.reporting_manager.record_message_metrics(
                                 protocol=http_protocol_key,
                                 response_time_ms=response_time_ms,
                                 status_code=response.status,
-                                message_size_bytes=len(payload_json_str.encode('utf-8')), # Corrected variable here
-                                success=True
+                                message_size_bytes=message_size_bytes,
+                                success=is_successful
                             )
-                            self.logger.debug(f"HTTP success for {device.device_id}: {response.status}, {response_time_ms:.2f}ms")
-                        else: # Fallback if reporting_manager is somehow not available
-                            self.shared_stats['messages_sent'] += 1
-                            if http_protocol_key in self.protocol_stats:
-                                self.protocol_stats[http_protocol_key]['messages_sent'] += 1
-                        
-                        # Optionally read response content if needed, e.g., for validation
-                        # response_text = await response.text() 
-                        # self.logger.debug(f"HTTP Response for {device.device_id}: {response_text[:100]}")
-
-
-                    if response.status >= 400:
-                        self.logger.warning(f"HTTP error for device {device.device_id}: {response.status}")
-                        if self.reporting_manager:
-                            # This path might be redundant if record_message_metrics handles success=False
-                            # but kept for clarity if record_message_metrics is only called on successful HTTP transaction
-                            self.reporting_manager.record_message_failed(http_protocol_key)
                         else:
-                            self.shared_stats['messages_failed'] += 1
-                            if http_protocol_key in self.protocol_stats:
-                                 self.protocol_stats[http_protocol_key]['messages_failed'] += 1
-                
-                except aiohttp.ClientConnectorError as e:
-                    end_time = time.monotonic()
-                    response_time_ms = (end_time - start_time) * 1000
-                    self.logger.error(f"HTTP connection error for device {device.device_id}: {e}")
-                    if self.reporting_manager:
-                        self.reporting_manager.record_message_metrics(
-                            protocol=http_protocol_key,
-                            response_time_ms=response_time_ms,
-                            status_code=599, # Custom code for connection error
-                            message_size_bytes=message_size_bytes,
-                            success=False
-                        )
-                    else:
-                        self.shared_stats['messages_failed'] += 1
-                        if http_protocol_key in self.protocol_stats:
-                            self.protocol_stats[http_protocol_key]['messages_failed'] += 1
-                
-                except asyncio.TimeoutError:
-                    end_time = time.monotonic()
-                    response_time_ms = (end_time - start_time) * 1000
-                    self.logger.warning(f"HTTP timeout for device {device.device_id}")
-                    if self.reporting_manager:
-                        self.reporting_manager.record_message_metrics(
-                            protocol=http_protocol_key,
-                            response_time_ms=response_time_ms, # or a fixed high value for timeout
-                            status_code=408, # HTTP Timeout
-                            message_size_bytes=message_size_bytes,
-                            success=False
-                        )
-                    else:
-                        self.shared_stats['messages_failed'] += 1
-                        if http_protocol_key in self.protocol_stats:
-                            self.protocol_stats[http_protocol_key]['messages_failed'] += 1
+                            # Fallback if reporting_manager is not available
+                            if is_successful:
+                                self.shared_stats['messages_sent'] += 1
+                                if http_protocol_key in self.protocol_stats:
+                                    self.protocol_stats[http_protocol_key]['messages_sent'] += 1
+                            else:
+                                self.shared_stats['messages_failed'] += 1
+                                if http_protocol_key in self.protocol_stats:
+                                    self.protocol_stats[http_protocol_key]['messages_failed'] += 1
+                        
+                        if is_successful:
+                            message_count += 1
+                            self.logger.debug(f"HTTP message {message_count} sent by {device.device_id} to {url}, status: {response.status}")
+                        else:
+                            self.logger.warning(f"HTTP post failed for device {device.device_id}: HTTP {response.status}")
 
                 except Exception as e:
-                    end_time = time.monotonic()
-                    response_time_ms = (end_time - start_time) * 1000
-                    self.logger.error(f"HTTP general error for device {device.device_id}: {e}", exc_info=True)
+                    self.logger.exception(f"HTTP worker error for device {device.device_id}: {e.__class__.__name__} - {e}")
+                    # If an exception occurs, it's a failure. Update stats directly if no reporting_manager.
                     if self.reporting_manager:
                          self.reporting_manager.record_message_metrics(
                             protocol=http_protocol_key,
-                            response_time_ms=response_time_ms,
-                            status_code=598, # Custom code for other client-side error
+                            response_time_ms=0, # Or some indicator of failure
+                            status_code=599, # Custom code for client-side exception
                             message_size_bytes=message_size_bytes,
                             success=False
                         )
                     else:
-                        self.shared_stats['messages_failed'] += 1
-                        if http_protocol_key in self.protocol_stats:
-                            self.protocol_stats[http_protocol_key]['messages_failed'] += 1
+                        self._update_stats(http_protocol_key, success=False)
 
+
+                if not self.running: # Re-check running status before sleep
+                    break
                 await asyncio.sleep(message_interval)

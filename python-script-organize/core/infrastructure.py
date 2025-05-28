@@ -9,10 +9,13 @@ import time
 import asyncio
 import aiohttp
 import logging
-from typing import List, Optional
+from typing import List, Optional, TYPE_CHECKING
 
 from models.device import Device
 from config.hono_config import HonoConfig
+
+if TYPE_CHECKING:
+    from .reporting import ReportingManager  # Adjust path if ReportingManager is in a different location
 
 
 class InfrastructureManager:
@@ -21,11 +24,18 @@ class InfrastructureManager:
     def __init__(self, config: HonoConfig):
         self.config = config
         self.logger = logging.getLogger(__name__)
+        self.tenants: List[str] = []
+        self.devices: List[Device] = []
+        # Initialize stats dictionary for infrastructure-related metrics
         self.stats = {
-            'tenants_registered': 0,
-            'devices_registered': 0,
+            'tenants_created': 0,
+            'devices_created': 0,
+            'credentials_set': 0,
             'validation_success': 0,
-            'validation_failed': 0
+            'validation_failed': 0,
+            'registration_attempts': 0,
+            'registration_throttled': 0,
+            'devices_registered': 0 # Specifically for throttled registration success
         }
     
     async def create_tenant(self, session: aiohttp.ClientSession) -> str:
@@ -47,8 +57,7 @@ class InfrastructureManager:
                 if response.status == 201:
                     data = await response.json()
                     tenant_id = data['id']
-                    self.stats['tenants_registered'] += 1
-                    self.logger.info(f"Created tenant: {tenant_id}")
+                    self.stats['tenants_created'] += 1 # Corrected key here                    self.logger.info(f"Created tenant: {tenant_id}")
                     return tenant_id
                 else:
                     error_text = await response.text()
@@ -58,42 +67,50 @@ class InfrastructureManager:
             self.logger.error(f"Exception creating tenant: {e}")
             return None
     
-    async def create_device(self, session: aiohttp.ClientSession, tenant_id: str) -> Optional[Device]:
+    async def create_device(self, session: aiohttp.ClientSession, tenant_id: str, device_id_suffix: Optional[str] = None) -> Optional[Device]:
         """Create a new device in the specified tenant."""
+        device_id = f"device-{device_id_suffix if device_id_suffix else os.urandom(8).hex()}"
         # Use HTTPS or HTTP based on TLS setting
         protocol_scheme = "https" if self.config.use_tls else "http"
-        url = f"{protocol_scheme}://{self.config.registry_ip}:{self.config.registry_port}/v1/devices/{tenant_id}"
+        url = f"{protocol_scheme}://{self.config.registry_ip}:{self.config.registry_port}/v1/devices/{tenant_id}/{device_id}"
         
+        self.logger.debug(f"Creating device: {url}")
         try:
-            async with session.post(url) as response:
+            headers = {"Content-Type": "application/json"}
+            async with session.post(url, headers=headers, json={}) as response: # Empty JSON body
                 if response.status == 201:
-                    data = await response.json()
-                    device_id = data['id']
+                    self.logger.info(f"Device {device_id} created in tenant {tenant_id}")
+                    # Device object needs password, which is set by set_device_credentials
+                    # For now, create a placeholder and set credentials next
+                    device_password = f"this-is-my-password" # Placeholder, should be secure
+                    device = Device(device_id=device_id, tenant_id=tenant_id, password=device_password, auth_id=device_id)
                     
-                    # Use consistent password from config, fallback to environment default
-                    password = self.config.my_password if self.config.my_password else "this-is-my-password"
-                    
-                    device = Device(
-                        device_id=device_id,
-                        tenant_id=tenant_id,
-                        password=password,
-                        auth_id=device_id  # Using device_id as auth_id like in registrar
-                    )
-                    
-                    # Set device credentials
+                    # Set credentials immediately after creation
                     if await self.set_device_credentials(session, device):
-                        self.stats['devices_registered'] += 1
-                        self.logger.info(f"Created device: {device_id} in tenant: {tenant_id} with password: {password}")
+                        self.logger.info(f"Credentials set for device {device.device_id}")
                         return device
                     else:
-                        self.logger.error(f"Failed to set credentials for device: {device_id}")
+                        self.logger.error(f"Failed to set credentials for device {device.device_id}")
+                        # Optionally, attempt to delete the device if credential setting fails
+                        # await self.delete_device(session, tenant_id, device_id)
+                        return None
+                elif response.status == 409: # Conflict, device already exists
+                    self.logger.warning(f"Device {device_id} already exists in tenant {tenant_id}. Attempting to retrieve/reuse.")
+                    # Try to set/reset credentials for existing device
+                    device_password = f"this-is-my-password" # Placeholder
+                    device = Device(device_id=device_id, tenant_id=tenant_id, password=device_password, auth_id=device_id)
+                    if await self.set_device_credentials(session, device):
+                        self.logger.info(f"Credentials reset for existing device {device.device_id}")
+                        return device
+                    else:
+                        self.logger.error(f"Failed to set credentials for existing device {device.device_id}")
                         return None
                 else:
                     error_text = await response.text()
-                    self.logger.error(f"Failed to create device: {response.status} - {error_text}")
+                    self.logger.error(f"Failed to create device {device_id}: {response.status} - {error_text}")
                     return None
         except Exception as e:
-            self.logger.error(f"Exception creating device: {e}")
+            self.logger.error(f"Exception creating device {device_id}: {e}", exc_info=True)
             return None
     
     async def set_device_credentials(self, session: aiohttp.ClientSession, device: Device) -> bool:
@@ -229,3 +246,177 @@ class InfrastructureManager:
             else:
                 self.logger.warning(f"⚠️  Only {successful_validations}/{len(devices)} devices validated. Some may fail during load testing.")
                 return tenants, devices, True
+    
+    """Enhanced infrastructure manager with registration throttling."""
+    
+    async def setup_infrastructure_with_throttling(self, num_tenants: int = 5, num_devices: int = 10, 
+                                                  reporting_manager: Optional['ReportingManager'] = None) -> bool:
+        """Set up infrastructure with advanced registration throttling."""
+        self.logger.info(f"Setting up {num_tenants} tenants with {num_devices} devices total (throttled)...")
+        
+        # Configure SSL context properly based on environment
+        ssl_context = None
+        if self.config.use_tls:
+            if self.config.ca_file_path and os.path.exists(self.config.ca_file_path):
+                ssl_context = ssl.create_default_context(cafile=self.config.ca_file_path)
+                self.logger.info(f"Using CA file for TLS: {self.config.ca_file_path}")
+            else:
+                ssl_context = ssl.create_default_context()
+                self.logger.info("Using default SSL context for TLS.")
+            
+            if not self.config.verify_ssl:
+                ssl_context.check_hostname = False
+                ssl_context.verify_mode = ssl.CERT_NONE
+                self.logger.warning("SSL certificate verification is DISABLED.")
+        
+        connector = aiohttp.TCPConnector(ssl=ssl_context, limit=self.config.http_connection_limit if hasattr(self.config, 'http_connection_limit') else 100)
+        timeout = aiohttp.ClientTimeout(total=self.config.http_timeout)
+        
+        created_tenants_list: List[str] = []
+
+        try:
+            async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+                # Create tenants first
+                tenant_tasks = [self.create_tenant(session) for _ in range(num_tenants)]
+                tenant_results = await asyncio.gather(*tenant_tasks, return_exceptions=True)
+                
+                created_tenants_list = [t for t in tenant_results if isinstance(t, str)]
+                self.tenants = created_tenants_list # Store created tenant IDs
+
+                if not self.tenants:
+                    self.logger.error("No tenants created successfully during throttled setup!")
+                    return False
+                self.logger.info(f"Successfully created {len(self.tenants)} tenants for throttled setup.")
+                self.stats['tenants_created'] = len(self.tenants)
+
+
+                # Calculate devices per tenant
+                if not self.tenants: # Should not happen if previous check passed
+                    self.logger.error("Cannot distribute devices as no tenants were created.")
+                    return False
+
+                devices_per_tenant = num_devices // len(self.tenants)
+                extra_devices = num_devices % len(self.tenants)
+                
+                total_devices_to_create_count = 0
+                device_creation_tasks = []
+                
+                for i, tenant_id in enumerate(self.tenants):
+                    tenant_device_count = devices_per_tenant + (1 if i < extra_devices else 0)
+                    
+                    for device_index_in_tenant in range(tenant_device_count):
+                        # Use a global index for unique device IDs and delay calculation
+                        global_device_index = total_devices_to_create_count 
+                        
+                        # Calculate throttling delay
+                        delay = 0.0
+                        if reporting_manager and hasattr(reporting_manager, 'calculate_registration_delay'):
+                            delay = reporting_manager.calculate_registration_delay(
+                                global_device_index, num_devices
+                            )
+                        elif hasattr(self.config, 'throttling_base_delay'): # Fallback to config if RM not fully equipped
+                            delay = self.config.throttling_base_delay + (global_device_index * 0.01) # Small progressive
+                        else:
+                            delay = 0.1 * global_device_index 
+                        
+                        # Create throttled device creation task
+                        task = self._create_device_with_throttling(
+                            session, # Pass the session
+                            tenant_id, 
+                            global_device_index, # Use global index for device ID
+                            delay, 
+                            reporting_manager
+                        )
+                        device_creation_tasks.append(task)
+                        total_devices_to_create_count +=1
+                
+                # Execute all device creation tasks with throttling
+                device_results = await asyncio.gather(*device_creation_tasks, return_exceptions=True)
+                
+                # Count successful creations
+                successful_devices: List[Device] = []
+                for result in device_results:
+                    if isinstance(result, Device):
+                        successful_devices.append(result)
+                    elif isinstance(result, Exception):
+                        self.logger.error(f"Device creation failed during throttled setup: {result}", exc_info=True)
+                
+                self.devices = successful_devices
+                self.stats['devices_created'] = len(self.devices)
+                self.logger.info(f"Created {len(self.devices)} devices successfully with throttling")
+                
+                if reporting_manager:
+                    # This stat is specific to reporting manager's view of successful registrations
+                    # It might be slightly different if RM's record_registration_attempt has more criteria
+                    reporting_manager.stats['devices_registered'] = len(self.devices) 
+            
+            if not self.devices:
+                self.logger.warning("No devices were created successfully in throttled setup.")
+                return False
+
+            # Validate all created devices
+            self.logger.info("Validating devices with initial telemetry (throttled setup)...")
+            async with aiohttp.ClientSession(connector=connector, timeout=timeout) as validation_session:
+                validation_tasks = [self.validate_device_http(validation_session, device) for device in self.devices]
+                validation_results = await asyncio.gather(*validation_tasks, return_exceptions=True)
+
+            successful_validations = sum(1 for r in validation_results if r is True)
+            self.logger.info(f"Validation complete (throttled setup): {successful_validations}/{len(self.devices)} devices validated")
+
+            if successful_validations == len(self.devices):
+                self.logger.info("✅ All devices validated successfully (throttled setup)! Ready to start load testing.")
+            else:
+                self.logger.warning(f"⚠️  Only {successful_validations}/{len(self.devices)} devices validated (throttled setup). Some may fail during load testing.")
+            
+            return True # Return True even if not all devices validated, as some might still work
+            
+        except Exception as e:
+            self.logger.error(f"Infrastructure setup with throttling failed: {e}", exc_info=True)
+            return False
+
+    async def _create_device_with_throttling(self, session: aiohttp.ClientSession, tenant_id: str, device_index: int, 
+                                           delay: float, reporting_manager: Optional['ReportingManager'] = None) -> Optional[Device]:
+        """Create a single device with throttling delay using the provided session."""
+        # Apply throttling delay
+        if delay > 0:
+            self.logger.debug(f"Applying registration delay of {delay:.2f}s for device index {device_index}")
+            await asyncio.sleep(delay)
+        
+        # Ensure device_id is unique, e.g., by using the global device_index
+        device_id = f"device-{device_index:04d}" # Padded for more devices
+        
+        device_obj = None
+        success = False
+        try:
+            # Call the existing create_device which now should handle session internally or be passed one
+            # Assuming create_device can take a session or creates its own if not passed
+            device_obj = await self.create_device(session, tenant_id, device_id_suffix=f"{device_index:04d}")
+            
+            if device_obj:
+                # Attempt to set credentials
+                # The create_device method should ideally return a full Device object with password
+                # If not, set_device_credentials would be needed here.
+                # For now, assuming create_device handles password generation and setting.
+                # If set_device_credentials is still separate:
+                # cred_success = await self.set_device_credentials(session, device_obj)
+                # success = cred_success
+                success = True # Assuming create_device now returns a fully formed device
+            
+            # Record registration metrics
+            if reporting_manager and hasattr(reporting_manager, 'record_registration_attempt'):
+                reporting_manager.record_registration_attempt(
+                    device_id, delay, success
+                )
+            
+            return device_obj if success else None
+            
+        except Exception as e:
+            self.logger.error(f"Exception in _create_device_with_throttling for {device_id}: {e}", exc_info=True)
+            # Record failed registration
+            if reporting_manager and hasattr(reporting_manager, 'record_registration_attempt'):
+                reporting_manager.record_registration_attempt(
+                    device_id, delay, False # Explicitly False on exception
+                )
+            # Do not re-raise if you want to continue with other devices, 
+            # but return None to indicate failure for this one.
+            return None

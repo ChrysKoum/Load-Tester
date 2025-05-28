@@ -71,12 +71,12 @@ class HonoLoadTester:
         self.reporting_manager.initialize_test(protocols)
         self.reporting_manager.set_running(True)
         self.protocol_workers.set_running(True)
-        self.reporting_manager.monitor_stats() # Start the monitoring thread
+        self.reporting_manager.monitor_stats()
 
         self._worker_threads.clear() 
         
         # Distribute devices across protocols
-        effective_protocols = protocols if protocols else ["mqtt"] # Default to mqtt if empty
+        effective_protocols = protocols if protocols else ["mqtt"]
         num_total_devices = len(self.devices)
         num_protocols = len(effective_protocols)
 
@@ -90,32 +90,37 @@ class HonoLoadTester:
             current_protocol_devices = self.devices[device_idx_start : device_idx_start + num_devices_for_protocol]
             device_idx_start += num_devices_for_protocol
 
-            if not current_protocol_devices and num_total_devices > 0 : # If devices exist but none assigned, log warning
+            if not current_protocol_devices and num_total_devices > 0:
                  self.logger.warning(f"No devices assigned to protocol {protocol_name} due to distribution logic.")
                  continue
             
             self.logger.info(f"Assigning {len(current_protocol_devices)} devices to protocol {protocol_name}")
+            
+            # Set device count correctly - this is the ONLY place where device count is set
             if protocol_name in self.reporting_manager.protocol_stats:
                  self.reporting_manager.protocol_stats[protocol_name]['devices'] = len(current_protocol_devices)
-
+                 self.logger.debug(f"Set device count for {protocol_name}: {len(current_protocol_devices)}")
 
             for device in current_protocol_devices:
-                thread_target = None
-                thread_args = () # For non-lambda targets
-
                 if protocol_name.lower() == "mqtt":
                     thread_target = self.protocol_workers.mqtt_telemetry_worker
                     thread_args = (device, message_interval, message_type)
+                    worker_thread = threading.Thread(target=thread_target, args=thread_args)
+                    self._worker_threads.append(worker_thread)
+                    
                 elif protocol_name.lower() == "http":
-                    # Lambda to run async worker, capturing current device, interval, type
-                    thread_target = lambda d=device, mi=message_interval, mt=message_type: \
-                                    asyncio.run(self.protocol_workers.http_telemetry_worker(d, mi, mt))
+                    # Fix: Use a proper wrapper function for async HTTP worker
+                    def http_worker_wrapper(device_ref, interval, msg_type):
+                        asyncio.run(self.protocol_workers.http_telemetry_worker(device_ref, interval, msg_type))
+                    
+                    worker_thread = threading.Thread(
+                        target=http_worker_wrapper, 
+                        args=(device, message_interval, message_type)
+                    )
+                    self._worker_threads.append(worker_thread)
                 else:
                     self.logger.warning(f"Protocol {protocol_name} not implemented yet")
                     continue
-                
-                worker_thread = threading.Thread(target=thread_target, args=thread_args)
-                self._worker_threads.append(worker_thread)
 
         # Start all worker threads
         for thread in self._worker_threads:
