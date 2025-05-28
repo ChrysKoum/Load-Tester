@@ -4,7 +4,7 @@ Defines various test scenarios from light load to stress testing, including long
 """
 
 from dataclasses import dataclass
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from enum import Enum
 
 
@@ -17,6 +17,7 @@ class TestIntensity(Enum):
     STRESS = "stress"
     EXTREME = "extreme"
     ENDURANCE = "endurance"
+    CUSTOM = "custom"
 
 
 @dataclass
@@ -35,6 +36,12 @@ class TestMode:
     expected_rps: str        # expected requests per second
     memory_usage: str        # expected memory usage
     target_duration_hours: float = 0.0  # For endurance tests
+    # Add new fields for custom mode features
+    enable_poisson: bool = False
+    enable_throttling: bool = False
+    throttling_base_delay: Any = None # Or a sensible default like 0.5
+    throttling_jitter: Any = None     # Or a sensible default like 0.2
+    generate_report: bool = False
 
 
 # Define comprehensive test modes with variations from 1-150 devices
@@ -313,6 +320,28 @@ TEST_MODES: Dict[str, TestMode] = {
         notes="Pure HTTP testing for REST API validation and performance",
         expected_rps="12.5 req/sec",
         memory_usage="< 1 GB"
+    ),
+
+    # NEW CUSTOM MODE BASED ON USER COMMAND
+    "custom_http_poisson_throttled": TestMode(
+        name="Custom HTTP Poisson Throttled Test",
+        description="100 HTTP devices across 10 tenants with Poisson messaging and registration throttling.",
+        tenants=10,
+        devices=100,
+        protocols=["http"],
+        message_interval=10.0, # Default base interval, Poisson will vary this
+        duration_hint="Depends on test length, e.g., 15-30 minutes for observation",
+        intensity=TestIntensity.CUSTOM, # Using a new or existing appropriate intensity
+        recommended_hardware="8+ CPU cores, 16GB RAM (adjust based on actual load)",
+        notes="Custom test: HTTP, Poisson, Throttling (0.2s base delay, 0.3s jitter). Generates reports, graphs, and logs.",
+        expected_rps="~10-50 req/sec (highly variable due to Poisson)", # Estimate
+        memory_usage="< 2 GB", # Estimate
+        # Specific settings for this mode that might be used by stress.py if it checks mode attributes:
+        enable_poisson=True,
+        enable_throttling=True,
+        throttling_base_delay=0.2,
+        throttling_jitter=0.3,
+        generate_report=True, # Implies --report
     )
 }
 

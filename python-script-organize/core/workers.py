@@ -17,39 +17,21 @@ from typing import Dict, Optional # Added Optional for type hinting
 
 from models.device import Device
 from config.hono_config import HonoConfig
-
+from core.reporting import ReportingManager # Add this if not present
 
 class ProtocolWorkers:
-    """Contains worker functions for different protocols."""
-    
-    def __init__(self, config: HonoConfig, shared_stats: Dict, protocol_stats: Dict, reporting_manager=None):
+    """Handles worker threads for different protocols."""
+
+    def __init__(self, config: HonoConfig, reporting_manager: ReportingManager): # Modified
         self.config = config
-        self.shared_stats = shared_stats
-        self.protocol_stats = protocol_stats
-        self.reporting_manager = reporting_manager
-        self.running = False
-        
-        # Setup logging
-        logging.basicConfig(
-            level=logging.INFO,
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-        )
+        self.reporting_manager = reporting_manager # Store the manager
         self.logger = logging.getLogger(__name__)
+        self._running = True
+        # self.stats = stats # Remove, access via self.reporting_manager.stats
+        # self.protocol_stats = protocol_stats # Remove, access via self.reporting_manager.protocol_stats
 
     def set_running(self, running: bool):
-        """Set the running state for all workers."""
-        self.running = running
-
-    def _update_stats(self, protocol_key: str, success: bool, message_count_increment: int = 1):
-        """Helper to update general and protocol-specific stats."""
-        if success:
-            self.shared_stats['messages_sent'] += message_count_increment
-            if protocol_key in self.protocol_stats:
-                self.protocol_stats[protocol_key]['messages_sent'] += message_count_increment
-        else:
-            self.shared_stats['messages_failed'] += message_count_increment # Assuming one failure means one message attempt failed
-            if protocol_key in self.protocol_stats:
-                self.protocol_stats[protocol_key]['messages_failed'] += message_count_increment
+        self._running = running
 
     def _get_mqtt_ssl_context(self) -> Optional[ssl.SSLContext]:
         """Creates and configures an SSLContext for MQTT TLS connections."""
@@ -108,7 +90,10 @@ class ProtocolWorkers:
                 self.logger.debug(f"Device {device.device_id}: Attempting MQTT TLS to {mqtt_host}:{mqtt_port}")
             else:
                 self.logger.error(f"Device {device.device_id}: MQTT TLS requested but SSL context creation failed. Aborting connection.")
-                self._update_stats(mqtt_protocol_key, success=False)
+                self.reporting_manager.record_message_metrics(
+                    protocol="mqtt", device_id=device.device_id, tenant_id=device.tenant_id,
+                    success=False, response_time=0, status_code=500
+                )
                 return
         else:
             mqtt_port = self.config.mqtt_insecure_port
@@ -156,7 +141,10 @@ class ProtocolWorkers:
             if not connected_flag:
                 err_msg = connection_rc_detail or f"Connection attempt timed out after {connect_timeout}s"
                 self.logger.error(f"MQTT final connection status for {device.device_id}: FAILED - {err_msg}")
-                self._update_stats(mqtt_protocol_key, success=False)
+                self.reporting_manager.record_message_metrics(
+                    protocol="mqtt", device_id=device.device_id, tenant_id=device.tenant_id,
+                    success=False, response_time=0, status_code=500
+                )
                 # client.loop_stop() is in finally
                 return
 
@@ -186,22 +174,19 @@ class ProtocolWorkers:
                 response_time_ms = (end_time - start_time) * 1000
 
                 if msg_info.rc == mqtt.MQTT_ERR_SUCCESS:
-                    if self.reporting_manager:
-                        self.reporting_manager.record_message_sent("mqtt")
-                        # Record latency metrics if available
-                        if 'response_time_ms' in locals():
-                            self.reporting_manager.record_latency_metrics(response_time_ms)
-                    else:
-                        self.shared_stats['messages_sent'] += 1
+                    self.reporting_manager.record_message_metrics(
+                        protocol="mqtt", device_id=device.device_id, tenant_id=device.tenant_id,
+                        success=True, response_time=response_time_ms, status_code=200
+                    )
                     message_count += 1
                     self.logger.debug(f"MQTT message {message_count} sent by {device.device_id} to topic '{topic}' in {response_time_ms:.0f}ms")
                 else:
-                    if self.reporting_manager:
-                        self.reporting_manager.record_message_failed("mqtt")
-                    else:
-                        self.shared_stats['messages_failed'] += 1
-                    self.logger.warning(f"MQTT publish failed for device {device.device_id}: {mqtt.error_string(msg_info.rc)} (rc: {msg_info.rc})")
-                    self._update_stats(mqtt_protocol_key, success=False)
+                    error_message = mqtt.error_string(msg_info.rc)
+                    self.reporting_manager.record_message_metrics(
+                        protocol="mqtt", device_id=device.device_id, tenant_id=device.tenant_id,
+                        success=False, response_time=response_time_ms, status_code=500, error=error_message
+                    )
+                    self.logger.warning(f"MQTT publish failed for device {device.device_id}: {error_message} (rc: {msg_info.rc})")
                     # Decide if to break loop on publish failure or continue
                     # if not msg_info.is_published(): # Additional check for QoS 1/2 if not waiting
                     #     self.logger.warning(f"MQTT message for {device.device_id} may not have been sent (mid={msg_info.mid})")                if not self.running or not connected_flag: # Re-check running and connection status before sleep
@@ -210,16 +195,28 @@ class ProtocolWorkers:
 
         except (socket.timeout, TimeoutError) as e: # Catch generic TimeoutError too
             self.logger.error(f"MQTT worker timeout for {device.device_id}: {e}")
-            self._update_stats(mqtt_protocol_key, success=False)
+            self.reporting_manager.record_message_metrics(
+                protocol="mqtt", device_id=device.device_id, tenant_id=device.tenant_id,
+                success=False, response_time=0, status_code=500
+            )
         except ConnectionRefusedError as e:
             self.logger.error(f"MQTT worker ConnectionRefusedError for {device.device_id}: {e}")
-            self._update_stats(mqtt_protocol_key, success=False)
+            self.reporting_manager.record_message_metrics(
+                protocol="mqtt", device_id=device.device_id, tenant_id=device.tenant_id,
+                success=False, response_time=0, status_code=500
+            )
         except OSError as e: # Catches NoRouteToHost, HostDown, etc.
             self.logger.error(f"MQTT worker OSError for {device.device_id}: {e}")
-            self._update_stats(mqtt_protocol_key, success=False)
+            self.reporting_manager.record_message_metrics(
+                protocol="mqtt", device_id=device.device_id, tenant_id=device.tenant_id,
+                success=False, response_time=0, status_code=500
+            )
         except Exception as e:
             self.logger.exception(f"MQTT worker generic error for device {device.device_id}: {e.__class__.__name__} - {e}") # Use .exception for stack trace
-            self._update_stats(mqtt_protocol_key, success=False)
+            self.reporting_manager.record_message_metrics(
+                protocol="mqtt", device_id=device.device_id, tenant_id=device.tenant_id,
+                success=False, response_time=0, status_code=500
+            )
         finally:
             try:
                 if client.is_connected(): # is_connected() might not be fully reliable after loop_stop

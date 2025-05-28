@@ -10,15 +10,36 @@ import logging
 import random
 import numpy as np
 from pathlib import Path
-from typing import Dict, List, Optional
 from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple, Any, TYPE_CHECKING
+
+# Import HonoConfig only for type checking to avoid circular imports at runtime
+if TYPE_CHECKING:
+    from config.hono_config import HonoConfig # Import for type hinting
 
 from models.device import Device
-from utils.constants import REPORTING_AVAILABLE
+from utils.constants import REPORTING_AVAILABLE # Ensure this is imported
 
 if REPORTING_AVAILABLE:
+    import matplotlib
+    # It's good practice to set the backend *before* importing pyplot if possible,
+    # or at least before any plotting commands.
+    try:
+        # Attempt to use a non-interactive backend suitable for scripts
+        matplotlib.use('Agg')
+    except ImportError: # Fallback if 'Agg' is not available (e.g. minimal install)
+        pass
+    except Exception as e:
+        # Log a warning if backend switching fails for other reasons.
+        # This logging will happen if the logger for this module is already configured.
+        # logging.getLogger(__name__).warning(f"Could not set matplotlib backend to Agg: {e}")
+        pass
     import matplotlib.pyplot as plt
     import pandas as pd
+else:
+    # If matplotlib or pandas are not available, plotting will be skipped.
+    # The REPORTING_AVAILABLE flag will control this.
+    pass
 
 
 @dataclass
@@ -28,14 +49,14 @@ class AdvancedMetrics:
     registration_queue_size: int      # Current registration queue size
     poisson_intervals: List[float]    # Track actual intervals used
     expected_vs_actual_rate: Dict[str, float]  # Rate comparison
-    adapter_load_metrics: Dict[str, int]  # Track adapter load
+    adapter_load_metrics: Dict[str, Any]  # Track adapter load (changed int to Any for flexibility)
     message_distribution_stats: Dict[str, float]  # Distribution statistics
 
 
 class ReportingManager:
     """Enhanced reporting manager with advanced load testing metrics."""
-    
-    def __init__(self, config):
+
+    def __init__(self, config: 'HonoConfig'): # Forward reference 'HonoConfig' is fine with TYPE_CHECKING
         self.config = config
         self.logger = logging.getLogger(__name__)
         
@@ -66,34 +87,24 @@ class ReportingManager:
         }
         
         # Enhanced performance metrics
-        self.performance_metrics = {
+        self.performance_metrics: Dict[str, Any] = {
+            'messages_sent': 0,
+            'messages_failed': 0,
             'response_times': [],
-            'response_codes': {},
-            'latency_history': [],
-            'latency_sla_violations': {
-                '50ms': 0, '100ms': 0, '200ms': 0, '500ms': 0, '1000ms': 0
+            'protocol_stats': {}, 
+            'validation_success': 0, 
+            'validation_failed': 0,  
+            'total_validated_devices': 0,
+            'latency_history': [], # For get_real_time_latency_stats
+            'latency_sla_violations': { # For record_latency_metrics
+                '50ms': 0, '100ms': 0, '200ms': 0, '500ms': 0, '1000ms': 0 
             },
-            'data_transferred': {
-                'total_bytes': 0,
-                'request_bytes': 0,
-                'response_bytes': 0,
-                'min_message_size': float('inf'),
-                'max_message_size': 0
+            'response_codes': {}, # For record_message_metrics
+            'data_transferred': { # For record_message_metrics
+                'total_bytes': 0, 'request_bytes': 0, 
+                'min_message_size': float('inf'), 'max_message_size': 0
             },
-            'protocol_performance': {},
-            'connection_metrics': {
-                'total_connections': 0,
-                'failed_connections': 0,
-                'connection_times': [],
-                'reconnections': 0
-            },
-            'throughput_history': [],
-            'error_patterns': {},
-            'performance_degradation': {
-                'baseline_latency': None,
-                'current_latency': None,
-                'degradation_percentage': 0
-            }
+            'protocol_performance': {} # For record_message_metrics
         }
         
         # NEW: Advanced metrics for registration throttling and Poisson distribution
@@ -166,37 +177,104 @@ class ReportingManager:
         if not running and self.test_start_time:
             self.test_end_time = time.time()
 
-    def generate_report(self, tenants: List[str], devices: List[Device], report_dir: str = "./reports"):
-        """Generate detailed test report with charts."""
-        import os
-        import datetime
-        
-        # Create reports directory if it doesn't exist
-        os.makedirs(report_dir, exist_ok=True)
-        
-        # Generate timestamp for unique filename
+    def generate_report(self, tenants: List[str], devices: List[Device], report_dir: str): # report_dir is now the main output folder path
+        """Generate detailed test report with charts directly into the specified report_dir."""
+        # import os # Not strictly needed if only using Path
+        # import datetime # Already imported at module level
+
+        report_path = Path(report_dir) # This is the main timestamped run folder
+        # The report_path directory is already created by stress.py's main()
+
+        # Generate timestamp for unique report filename (within the run folder)
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        report_file = os.path.join(report_dir, f"hono_test_report_{timestamp}.txt")
+        # Use a more generic name or keep the timestamp if multiple reports per run are possible (not typical here)
+        report_file_name = f"hono_test_report_{timestamp}.txt"
+        report_file = report_path / report_file_name
         
-        # Calculate test duration
+        test_duration = 0.0
         if self.test_start_time:
-            if self.test_end_time:
-                test_duration = self.test_end_time - self.test_start_time
-            else:
-                test_duration = time.time() - self.test_start_time
-        else:
-            test_duration = 0
+            end_time = self.test_end_time or time.time()
+            test_duration = end_time - self.test_start_time
         
-        # Generate report content
         report_content = self._generate_report_content(tenants, devices, test_duration)
         
-        # Write report to file
         try:
-            with open(report_file, 'w') as f:
+            with open(report_file, 'w', encoding='utf-8') as f: # Ensure UTF-8 for report file
                 f.write(report_content)
-            self.logger.info(f"Report saved to: {report_file}")
+            self.logger.info(f"Report saved to: {report_file.resolve()}")
         except Exception as e:
             self.logger.error(f"Failed to save report: {e}")
+            return str(report_path) # Return base path even on error
+
+        if REPORTING_AVAILABLE:
+            graph_references = []
+            original_backend = None
+            backend_switched = False
+            try:
+                current_backend = plt.get_backend()
+                if current_backend.lower() != 'agg':
+                    original_backend = current_backend
+                    plt.switch_backend('Agg')
+                    backend_switched = True
+            except Exception as e:
+                self.logger.warning(f"Could not switch matplotlib backend to Agg: {e}. Graphs might not save correctly.")
+
+            plot_functions = [
+                self._plot_throughput_over_time,
+                self._plot_latency_over_time,
+                self._plot_latency_distribution
+            ]
+            if self.advanced_metrics.registration_delays: # Check if data exists
+                plot_functions.append(self._plot_registration_delays)
+            if self.advanced_metrics.poisson_intervals: # Check if data exists
+                plot_functions.append(self._plot_poisson_intervals)
+
+            for plot_func in plot_functions:
+                try:
+                    # Pass report_path (the main run folder) to plotting functions
+                    graph_file_path_obj = plot_func(report_path, timestamp) # plot_func returns Path object or None
+                    if graph_file_path_obj:
+                        # Graph files are in the same directory as the report, so just use the name.
+                        graph_references.append(f"{plot_func.__name__.replace('_plot_', '').replace('_', ' ').title()}: {graph_file_path_obj.name}")
+                except Exception as e_plot:
+                    self.logger.error(f"Error generating graph with {plot_func.__name__}: {e_plot}", exc_info=True)
+            
+            if graph_references:
+                # Append graph references to the existing report content string
+                # This part needs to be careful not to add to a file that's already closed or partially written.
+                # It's better to build the full report_content string first, then write once.
+                # Let's assume _generate_report_content returns the base, and we append here.
+                
+                graph_section = "\n\nGENERATED GRAPHS\n----------------------------------------\n"
+                graph_section += "\n".join(graph_references)
+                # Graphs are saved in report_path, which is the main run folder.
+                graph_section += f"\nGraphs saved in: {report_path.resolve()}"
+                
+                report_content += graph_section # Append to the string
+
+                try:
+                    with open(report_file, 'w', encoding='utf-8') as f: # Overwrite with full content including graphs
+                        f.write(report_content)
+                    self.logger.info(f"Report updated with graph references: {report_file.resolve()}")
+                except Exception as e:
+                    self.logger.error(f"Failed to update report with graph references: {e}")
+
+            if backend_switched and original_backend:
+                try:
+                    plt.switch_backend(original_backend)
+                except Exception as e:
+                    self.logger.warning(f"Could not switch matplotlib backend back to {original_backend}: {e}")
+        else:
+            self.logger.info("Matplotlib/Pandas not available. Skipping graph generation.")
+        
+        return str(report_file.resolve()) # Return the full path to the generated report file
+
+    def update_validation_stats(self, success_count: int, failure_count: int, total_devices: int):
+        """Updates the validation statistics."""
+        self.performance_metrics['validation_success'] = success_count
+        self.performance_metrics['validation_failed'] = failure_count
+        self.performance_metrics['total_validated_devices'] = total_devices
+        self.logger.debug(f"ReportingManager validation stats updated: Success={success_count}, Failed={failure_count}, Total={total_devices}")
 
     def _generate_report_content(self, tenants: List[str], devices: List[Device], test_duration: float) -> str:
         """Generate the content for the test report."""
@@ -221,7 +299,7 @@ class ReportingManager:
                     self.logger.warning(f"Correcting {protocol_name} device count from {stats['devices']} to {actual_device_count}")
                     stats['devices'] = actual_device_count
 
-        content = f"""============================================================
+        report_content = f"""============================================================
 HONO LOAD TEST DETAILED REPORT
 ============================================================
 
@@ -263,19 +341,19 @@ PROTOCOL BREAKDOWN
             protocol_total = stats['messages_sent'] + stats['messages_failed']
             protocol_success_rate = (stats['messages_sent'] / protocol_total * 100) if protocol_total > 0 else 100.0
             
-            content += f"""
+            report_content += f"""
 Protocol: {protocol.upper()}
   Devices: {stats['devices']}
   Messages Sent: {stats['messages_sent']}
   Messages Failed: {stats['messages_failed']}
   Success Rate: {protocol_success_rate:.1f}%"""
 
-        content += f"""
+        report_content += f"""
 
 ============================================================
 Report generated at: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
 
-        return content
+        return report_content
 
     def print_enhanced_final_stats(self):
         """Print enhanced final statistics."""
@@ -720,3 +798,163 @@ Max Interval: {max(intervals):.2f}s"""
             print(f"   Load Stability: {stability}")
         
         print("="*80)
+
+    # --- Plotting Methods ---
+    def _plot_throughput_over_time(self, output_dir: Path, timestamp: str) -> Optional[Path]: # output_dir is the main run folder
+        if not REPORTING_AVAILABLE: return None
+        if not self.time_series_data.get('timestamps') or not self.time_series_data.get('msg_rate'):
+            self.logger.warning("No throughput data to plot (timestamps or msg_rate missing).")
+            return None
+        
+        fig_name = f"throughput_over_time_{timestamp}.png"
+        fig_path = output_dir / fig_name
+        try:
+            plt.figure(figsize=(12, 6))
+            plt.plot(self.time_series_data['timestamps'], self.time_series_data['msg_rate'], label='Message Rate (msg/sec)', color='blue', linewidth=2)
+            
+            # Optional: Plot cumulative messages sent
+            # if self.time_series_data.get('messages_sent'):
+            #     ax2 = plt.gca().twinx()
+            #     ax2.plot(self.time_series_data['timestamps'], self.time_series_data['messages_sent'], label='Total Sent', color='green', linestyle='--', alpha=0.7)
+            #     ax2.set_ylabel("Total Messages Sent")
+            #     ax2.legend(loc='upper right')
+
+            plt.xlabel("Time")
+            plt.ylabel("Rate (msg/sec)")
+            plt.title("Throughput Over Time")
+            plt.gca().legend(loc='upper left')
+            plt.grid(True, linestyle='--', alpha=0.7)
+            plt.xticks(rotation=45)
+            plt.tight_layout()
+            plt.savefig(fig_path)
+            plt.close()
+            self.logger.info(f"Throughput graph saved to {fig_path}")
+            return fig_path
+        except Exception as e:
+            self.logger.error(f"Failed to plot throughput graph: {e}", exc_info=True)
+            if plt.gcf().get_axes(): plt.close()
+            return None
+
+    def _plot_latency_over_time(self, output_dir: Path, timestamp: str) -> Optional[Path]: # output_dir is the main run folder
+        if not REPORTING_AVAILABLE: return None
+        if not self.time_series_data.get('timestamps'):
+            self.logger.warning("No timestamps for latency over time plot.")
+            return None
+
+        fig_name = f"latency_over_time_{timestamp}.png"
+        fig_path = output_dir / fig_name
+        plotted_anything = False
+        try:
+            plt.figure(figsize=(12, 6))
+            if self.time_series_data.get('avg_latency') and any(self.time_series_data['avg_latency']):
+                plt.plot(self.time_series_data['timestamps'], self.time_series_data['avg_latency'], label='Avg Latency (ms)', color='green', linewidth=1.5)
+                plotted_anything = True
+            if self.time_series_data.get('latency_95th') and any(self.time_series_data['latency_95th']):
+                plt.plot(self.time_series_data['timestamps'], self.time_series_data['latency_95th'], label='P95 Latency (ms)', color='orange', linewidth=1.5)
+                plotted_anything = True
+            if self.time_series_data.get('latency_99th') and any(self.time_series_data['latency_99th']):
+                plt.plot(self.time_series_data['timestamps'], self.time_series_data['latency_99th'], label='P99 Latency (ms)', color='red', linewidth=1.5)
+                plotted_anything = True
+            
+            if not plotted_anything:
+                self.logger.warning("No valid latency series to plot for latency over time.")
+                plt.close()
+                return None
+
+            plt.xlabel("Time")
+            plt.ylabel("Latency (ms)")
+            plt.title("Latency Over Time")
+            plt.legend()
+            plt.grid(True, linestyle='--', alpha=0.7)
+            plt.xticks(rotation=45)
+            plt.tight_layout()
+            plt.savefig(fig_path)
+            plt.close()
+            self.logger.info(f"Latency over time graph saved to {fig_path}")
+            return fig_path
+        except Exception as e:
+            self.logger.error(f"Failed to plot latency over time graph: {e}", exc_info=True)
+            if plt.gcf().get_axes(): plt.close()
+            return None
+
+    def _plot_latency_distribution(self, output_dir: Path, timestamp: str) -> Optional[Path]: # output_dir is the main run folder
+        if not REPORTING_AVAILABLE: return None
+        if not self.performance_metrics.get('response_times') or not self.performance_metrics['response_times']:
+            self.logger.warning("No response time data for latency distribution plot.")
+            return None
+        
+        fig_name = f"latency_distribution_{timestamp}.png"
+        fig_path = output_dir / fig_name
+        try:
+            plt.figure(figsize=(10, 6))
+            # Filter out potential None or non-numeric values if any
+            valid_response_times = [rt for rt in self.performance_metrics['response_times'] if isinstance(rt, (int, float))]
+            if not valid_response_times:
+                self.logger.warning("No valid numeric response time data for latency distribution plot.")
+                plt.close()
+                return None
+
+            plt.hist(valid_response_times, bins=50, color='skyblue', edgecolor='black', alpha=0.75)
+            plt.xlabel("Latency (ms)")
+            plt.ylabel("Frequency")
+            plt.title("Latency Distribution")
+            plt.grid(axis='y', linestyle='--', alpha=0.7)
+            plt.tight_layout()
+            plt.savefig(fig_path)
+            plt.close()
+            self.logger.info(f"Latency distribution graph saved to {fig_path}")
+            return fig_path
+        except Exception as e:
+            self.logger.error(f"Failed to plot latency distribution graph: {e}", exc_info=True)
+            if plt.gcf().get_axes(): plt.close()
+            return None
+
+    def _plot_registration_delays(self, output_dir: Path, timestamp: str) -> Optional[Path]: # output_dir is the main run folder
+        if not REPORTING_AVAILABLE: return None
+        if not self.advanced_metrics.registration_delays:
+            self.logger.info("No registration delay data to plot (feature might be disabled or no delays recorded).")
+            return None
+        
+        fig_name = f"registration_delays_{timestamp}.png"
+        fig_path = output_dir / fig_name
+        try:
+            plt.figure(figsize=(10, 6))
+            plt.hist(self.advanced_metrics.registration_delays, bins=30, color='lightcoral', edgecolor='black', alpha=0.75)
+            plt.xlabel("Delay (s)")
+            plt.ylabel("Frequency")
+            plt.title("Registration Delay Distribution (Throttling)")
+            plt.grid(axis='y', linestyle='--', alpha=0.7)
+            plt.tight_layout()
+            plt.savefig(fig_path)
+            plt.close()
+            self.logger.info(f"Registration delay graph saved to {fig_path}")
+            return fig_path
+        except Exception as e:
+            self.logger.error(f"Failed to plot registration delay graph: {e}", exc_info=True)
+            if plt.gcf().get_axes(): plt.close()
+            return None
+
+    def _plot_poisson_intervals(self, output_dir: Path, timestamp: str) -> Optional[Path]: 
+        if not REPORTING_AVAILABLE: return None
+        if not self.advanced_metrics.poisson_intervals:
+            self.logger.info("No Poisson interval data to plot (feature might be disabled or no intervals recorded).")
+            return None
+        
+        fig_name = f"poisson_intervals_{timestamp}.png"
+        fig_path = output_dir / fig_name
+        try:
+            plt.figure(figsize=(10, 6))
+            plt.hist(self.advanced_metrics.poisson_intervals, bins=30, color='mediumseagreen', edgecolor='black', alpha=0.75)
+            plt.xlabel("Interval (s)")
+            plt.ylabel("Frequency")
+            plt.title("Poisson Message Interval Distribution")
+            plt.grid(axis='y', linestyle='--', alpha=0.7)
+            plt.tight_layout()
+            plt.savefig(fig_path)
+            plt.close()
+            self.logger.info(f"Poisson interval graph saved to {fig_path}")
+            return fig_path # Return Path object for consistency
+        except Exception as e:
+            self.logger.error(f"Failed to plot Poisson interval graph: {e}", exc_info=True)
+            if plt.gcf().get_axes(): plt.close()
+            return None

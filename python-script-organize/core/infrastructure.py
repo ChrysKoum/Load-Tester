@@ -9,19 +9,16 @@ import time
 import asyncio
 import aiohttp
 import logging
-from typing import List, Optional, TYPE_CHECKING
+from typing import List, Dict, Optional # Add Optional
 
 from models.device import Device
 from config.hono_config import HonoConfig
-
-if TYPE_CHECKING:
-    from .reporting import ReportingManager  # Adjust path if ReportingManager is in a different location
-
+from core.reporting import ReportingManager # Add this if not present
 
 class InfrastructureManager:
-    """Manages Hono infrastructure setup including tenants and devices."""
+    """Manages Hono infrastructure components like tenants and devices."""
     
-    def __init__(self, config: HonoConfig):
+    def __init__(self, config: HonoConfig, reporting_manager: Optional[ReportingManager] = None): # Modified
         self.config = config
         self.logger = logging.getLogger(__name__)
         self.tenants: List[str] = []
@@ -37,7 +34,12 @@ class InfrastructureManager:
             'registration_throttled': 0,
             'devices_registered': 0 # Specifically for throttled registration success
         }
-    
+        if reporting_manager:
+            self.reporting_manager = reporting_manager
+        else:
+            self.logger.warning("InfrastructureManager creating its own ReportingManager. Validation stats might not be globally tracked.")
+            self.reporting_manager = ReportingManager(config) # Fallback
+
     async def create_tenant(self, session: aiohttp.ClientSession) -> str:
         """Create a new tenant and return its ID."""
         # Use HTTPS or HTTP based on TLS setting
@@ -384,10 +386,26 @@ class InfrastructureManager:
                         result = await self.validate_device_http(validation_session, device)
                         if result:
                             successful_validations += 1
+                            self.stats['validation_success'] += 1 # Update internal stats
+                        else:
+                            self.stats['validation_failed'] += 1 # Update internal stats
                     except Exception as e:
                         self.logger.error(f"Validation exception for device {device.device_id}: {e}")
+                        self.stats['validation_failed'] += 1 # Update internal stats
 
             self.logger.info(f"Validation complete (throttled setup): {successful_validations}/{len(self.devices)} devices validated")
+
+            # Pass validation stats to ReportingManager if it's provided
+            if reporting_manager and hasattr(reporting_manager, 'update_validation_stats'):
+                reporting_manager.update_validation_stats(
+                    success_count=self.stats['validation_success'],
+                    failure_count=self.stats['validation_failed'],
+                    total_devices=len(self.devices)
+                )
+            elif reporting_manager: # Fallback if specific method doesn't exist, update directly
+                reporting_manager.performance_metrics['validation_success'] = self.stats['validation_success']
+                reporting_manager.performance_metrics['validation_failed'] = self.stats['validation_failed']
+
 
             if successful_validations == len(self.devices):
                 self.logger.info("✅ All devices validated successfully (throttled setup)! Ready to start load testing.")
@@ -446,3 +464,46 @@ class InfrastructureManager:
             # Do not re-raise if you want to continue with other devices, 
             # but return None to indicate failure for this one.
             return None
+
+    async def validate_device_registration(self, device: Device, tenant_id: str) -> bool:
+        """Validate device registration and credentials."""
+        # Use HTTPS or HTTP based on TLS setting
+        protocol_scheme = "https" if self.config.use_tls else "http"
+        url = f"{protocol_scheme}://{self.config.http_adapter_ip}:{self.config.http_adapter_port}/telemetry"
+        
+        headers = {
+            "Content-Type": "application/json"
+        }
+        
+        auth = aiohttp.BasicAuth(f"{device.auth_id}@{tenant_id}", device.password)
+        payload = {
+            "validation": True, 
+            "timestamp": int(time.time()),
+            "device_id": device.device_id,
+            "temperature": 25.0,
+            "humidity": 60.0,
+            "message": "validation_test"
+        }
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=payload, headers=headers, auth=auth) as response:
+                    if 200 <= response.status < 300:
+                        is_valid = True
+                        self.logger.info(f"Device {device.device_id} validated successfully.")
+                    else:
+                        is_valid = False
+                        error_text = await response.text()
+                        self.logger.warning(f"Validation failed for device {device.device_id}: {response.status} - {error_text}")
+        
+        except Exception as e:
+            is_valid = False
+            self.logger.error(f"Exception validating device {device.device_id}: {e}")
+        
+        # Update reporting manager stats
+        if is_valid:
+            self.reporting_manager.stats['validation_success'] += 1
+        else:
+            self.reporting_manager.stats['validation_failed'] += 1
+        
+        return is_valid
