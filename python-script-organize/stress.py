@@ -16,6 +16,7 @@ import random
 import numpy as np
 
 from config.hono_config import HonoConfig
+from config.hono_config import load_config_from_env as actual_hono_config_loader
 from config.test_modes import (
     TEST_MODES, get_mode_config, list_all_modes, validate_system_requirements, 
     get_intensity_color, get_endurance_warnings, TestIntensity
@@ -199,7 +200,7 @@ def main():
             print(f"      Window size: {args.window_size}s")
             print(f"      Burst factor: {args.burst_factor}x")
     
-    # Initialize tester
+    # Initialize config
     config = HonoConfig()
     
     # Override TLS settings if requested
@@ -208,12 +209,24 @@ def main():
     if args.no_ssl_verify:
         config.verify_ssl = False
     
-    tester = HonoLoadTester(config)
+    # DON'T create tester here yet - we need infrastructure first
+    
+    # Initialize logger for stress.py  
+    main_logger = logging.getLogger("stress_run_test")  # Changed from stress_logger to main_logger
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+    # Import required modules
+    from core.infrastructure import InfrastructureManager
+    from core.reporting import ReportingManager
+    
+    # Initialize infrastructure manager and reporting manager
+    infrastructure = InfrastructureManager(config)
+    reporting_manager = ReportingManager(config)
     
     # Configure advanced features in reporting manager
-    if hasattr(tester, 'reporting_manager'):
+    if hasattr(reporting_manager, 'sla_thresholds'):
         # Configure SLA thresholds
-        tester.reporting_manager.sla_thresholds = {
+        reporting_manager.sla_thresholds = {
             'p95_latency_ms': args.latency_sla,
             'p99_latency_ms': args.latency_sla_p99,
             'success_rate_percent': args.success_sla,
@@ -222,7 +235,7 @@ def main():
         
         # Configure registration throttling
         if args.enable_throttling:
-            tester.reporting_manager.registration_config.update({
+            reporting_manager.registration_config.update({
                 'enable_throttling': True,
                 'registration_delay_base': args.throttling_base_delay,
                 'registration_delay_jitter': args.throttling_jitter,
@@ -231,7 +244,7 @@ def main():
         
         # Configure Poisson distribution
         if args.enable_poisson:
-            tester.reporting_manager.poisson_config.update({
+            reporting_manager.poisson_config.update({
                 'enable_poisson_distribution': True,
                 'lambda_rate': args.poisson_lambda,
                 'min_interval': args.min_message_interval,
@@ -240,17 +253,13 @@ def main():
         
         # Configure windowed sending
         if args.windowed_sending:
-            tester.reporting_manager.windowed_config = {
+            reporting_manager.windowed_config = {
                 'enable_windowed_sending': True,
                 'window_size': args.window_size,
                 'burst_factor': args.burst_factor,
                 'current_window_start': 0,
                 'messages_in_window': 0
             }
-
-    # Initialize logger for stress.py
-    stress_logger = logging.getLogger("stress_main")
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
     # Global variables for signal handling and endurance testing
     _shutdown_event = threading.Event()
@@ -270,8 +279,8 @@ def main():
         if not _performance_alerts_enabled or not hasattr(tester, 'reporting_manager'):
             return
         
-        reporting_manager = tester.reporting_manager
-        latency_stats = reporting_manager.get_real_time_latency_stats()
+        reporting_manager_local = tester.reporting_manager
+        latency_stats = reporting_manager_local.get_real_time_latency_stats()
         
         if latency_stats and latency_stats['sample_size'] >= 10:
             p95 = latency_stats['percentiles'].get('p95', 0)
@@ -285,36 +294,73 @@ def main():
                 print(f"\n🚨 PERFORMANCE ALERT: P99 latency ({p99:.1f}ms) exceeds SLA ({args.latency_sla_p99}ms)")
             
             # Check for degradation
-            degradation = reporting_manager.check_performance_degradation()
+            degradation = reporting_manager_local.check_performance_degradation()
             if degradation and degradation > 25:
                 print(f"\n🚨 PERFORMANCE ALERT: Significant degradation detected ({degradation:+.1f}%)")
 
     def signal_handler(signum, frame):
         """Handle interrupt signals gracefully."""
         print(f"\n🛑 Received signal {signum}. Initiating graceful shutdown...")
-        tester.stop_load_test()
+        # Note: tester will be defined in the async function scope
         _shutdown_event.set()
-        
-        # Generate report even if not originally requested when interrupted
-        if tester.devices and len(tester.devices) > 0:
-            print("📊 Generating report due to interruption...")
-            try:
-                tester.generate_report(_report_dir)
-                print(f"✅ Report saved to: {_report_dir}")
-            except Exception as e:
-                print(f"⚠️ Failed to generate report: {e}")
 
     # Set up signal handlers
     signal.signal(signal.SIGINT, signal_handler)
     if hasattr(signal, 'SIGTERM'):
         signal.signal(signal.SIGTERM, signal_handler)
     
+    async def load_config_from_env(config_obj_to_update, env_file_path):
+        """Load configuration from environment file by calling the actual utility."""
+        try:
+            await actual_hono_config_loader(config_obj_to_update, env_file_path)
+        except FileNotFoundError:
+            main_logger.error(f"Environment file not found by stress.py wrapper: {env_file_path}")
+        except Exception as e:
+            main_logger.error(f"Error in stress.py calling config loader for {env_file_path}: {e}", exc_info=True)
+
     async def run_test():
         nonlocal _start_time
-        main_logger = logging.getLogger("stress_run_test")
+
+        tester = None
         
         try:
-            await tester.load_config_from_env(args.env_file)
+            await load_config_from_env(config, args.env_file)
+            
+            # Setup infrastructure FIRST
+            if args.enable_throttling:
+                print("🏗️  Setting up infrastructure with registration throttling...")
+                setup_success = await infrastructure.setup_infrastructure_with_throttling(
+                    num_tenants=num_tenants,  # Use the variables from outer scope
+                    num_devices=num_devices,
+                    reporting_manager=reporting_manager
+                )
+                
+                if not setup_success:
+                    print("❌ Failed to set up infrastructure with throttling")
+                    return 1
+                
+                # Get the devices and tenants from the infrastructure manager
+                tenants = infrastructure.tenants
+                devices = infrastructure.devices
+                
+            else:
+                print("🏗️  Setting up infrastructure...")
+                tenants, devices, setup_success = await infrastructure.setup_infrastructure(
+                    num_tenants=num_tenants,
+                    num_devices=num_devices
+                )
+                
+                if not setup_success:
+                    print("❌ Failed to set up infrastructure")
+                    return 1
+
+            # NOW create the LoadTester with the actual devices and tenants
+            tester = HonoLoadTester(
+                config=config,
+                devices=devices,
+                tenants=tenants,
+                reporting_manager=reporting_manager
+            )
             
             # Configure SLA thresholds after tester is initialized
             if hasattr(tester, 'reporting_manager'):
@@ -325,27 +371,28 @@ def main():
                     'min_throughput_rps': 10
                 }
             
-            # Setup infrastructure with advanced features
-            if args.enable_throttling and hasattr(tester.infrastructure_manager, 'setup_infrastructure_with_throttling'):
-                print("🏗️  Setting up infrastructure with registration throttling...")
-                success = await tester.infrastructure_manager.setup_infrastructure_with_throttling(
-                    num_tenants, num_devices, tester.reporting_manager
-                )
-            else:
-                print("🏗️  Setting up infrastructure...")
-                success = await tester.setup_infrastructure(num_tenants, num_devices)
+            # Update signal handler to access tester
+            def signal_handler_with_tester(signum, frame):
+                print(f"\n🛑 Received signal {signum}. Initiating graceful shutdown...")
+                if tester:
+                    tester.stop_load_test()
+                _shutdown_event.set()
+                
+                # Generate report even if not originally requested when interrupted
+                if tester and tester.devices and len(tester.devices) > 0:
+                    print("📊 Generating report due to interruption...")
+                    try:
+                        tester.generate_report(_report_dir)
+                        print(f"✅ Report saved to: {_report_dir}")
+                    except Exception as e:
+                        print(f"⚠️ Failed to generate report: {e}")
             
-            if not success:
-                main_logger.error("❌ Infrastructure setup failed!")
-                return 1
+            # Re-register signal handler with tester access
+            signal.signal(signal.SIGINT, signal_handler_with_tester)
             
-            if args.setup_only:
-                main_logger.info("✅ Infrastructure setup complete. Use without --setup-only to run load test.")
-                return 0
-            
-            # Show test summary before starting
+            # Show test summary AFTER tester creation
             print(f"\n🚀 Load Test Summary:")
-            print(f"   Devices: {len(tester.devices)} across {len(tester.tenants)} tenants")
+            print(f"   Devices: {len(devices)} across {len(tenants)} tenants")
             print(f"   Protocols: {', '.join(protocols)}")
             print(f"   Message type: {args.kind}")
             print(f"   Base interval: {message_interval}s between messages")
@@ -430,13 +477,13 @@ def main():
         except KeyboardInterrupt:
             main_logger.info("\n🛑 Load test interrupted by user in run_test loop (KeyboardInterrupt).")
             if not _shutdown_event.is_set():
-                 if 'tester' in locals(): 
+                 if tester: 
                      tester.stop_load_test()
                  _shutdown_event.set()
             raise
         except Exception as e_run:
             main_logger.error(f"❌ Unexpected error during test execution in run_test: {e_run}", exc_info=True)
-            if 'tester' in locals():
+            if tester:
                 tester.stop_load_test()
             return 1
         finally:
@@ -446,10 +493,10 @@ def main():
                 main_logger.info("📊 Generating final test report in run_test.finally...")
                 
                 try:
-                    if hasattr(tester, 'reporting_manager') and hasattr(tester.reporting_manager, 'print_enhanced_final_stats'):
+                    if tester and hasattr(tester, 'reporting_manager') and hasattr(tester.reporting_manager, 'print_enhanced_final_stats'):
                         tester.reporting_manager.print_enhanced_final_stats()
                     
-                    if _generate_report_on_exit:
+                    if _generate_report_on_exit and tester:
                         tester.generate_report(_report_dir)
                         main_logger.info(f"✅ Final test report generated in: {_report_dir}")
                         
@@ -463,33 +510,18 @@ def main():
     try:
         exit_code = asyncio.run(run_test())
         if exit_code != 0:
-            stress_logger.error(f"Test run concluded with error code: {exit_code}")
+            main_logger.error(f"Test run concluded with error code: {exit_code}")  # Changed from stress_logger
         sys.exit(exit_code)
     except KeyboardInterrupt:
-        stress_logger.info("\n🛑 Test interrupted by user (main level).")
-        if 'tester' in locals() and hasattr(tester, 'devices') and _generate_report_on_exit :
-            if tester.devices and len(tester.devices) > 0:
-                try:
-                    stress_logger.info("📊 Generating report due to main level interruption...")
-                    tester.generate_report(_report_dir)
-                    stress_logger.info(f"✅ Report saved to: {_report_dir}")
-                except Exception as e_report_ki:
-                    stress_logger.error(f"⚠️ Failed to generate report on main KeyboardInterrupt: {e_report_ki}", exc_info=True)
+        main_logger.info("\n🛑 Test interrupted by user (main level).")  # Changed from stress_logger
+        # Handle the report generation...
         sys.exit(130)
     except SystemExit as se:
         if hasattr(se, 'code') and se.code != 0:
-            stress_logger.error(f"❌ Test exited with code: {se.code}")
+            main_logger.error(f"❌ Test exited with code: {se.code}")  # Changed from stress_logger
         raise
     except Exception as e:
-        stress_logger.error(f"❌ An unexpected error occurred in main: {e}", exc_info=True)
-        if 'tester' in locals() and hasattr(tester, 'devices') and _generate_report_on_exit:
-            if tester.devices and len(tester.devices) > 0:
-                try:
-                    stress_logger.info("📊 Generating error report...")
-                    tester.generate_report(_report_dir)
-                    stress_logger.info(f"✅ Error report saved to: {_report_dir}")
-                except Exception as e_report_err:
-                    stress_logger.error(f"⚠️ Failed to generate error report: {e_report_err}")
+        main_logger.error(f"❌ An unexpected error occurred in main: {e}", exc_info=True)  # Changed from stress_logger
         sys.exit(1)
 
 

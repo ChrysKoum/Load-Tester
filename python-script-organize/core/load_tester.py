@@ -18,10 +18,12 @@ from core.reporting import ReportingManager
 class HonoLoadTester:
     """Main class for Hono load testing."""
     
-    def __init__(self, config: HonoConfig):
+    def __init__(self, config: HonoConfig, devices: List[Device], tenants: List[str], reporting_manager=None):
         self.config = config
-        self.tenants: List[str] = []
-        self.devices: List[Device] = []
+        self.devices = devices
+        self.tenants = tenants
+        self.reporting_manager = reporting_manager
+        self.logger = logging.getLogger(__name__)
         self._worker_threads: List[threading.Thread] = [] # Store worker threads
         
         # Setup logging
@@ -29,7 +31,6 @@ class HonoLoadTester:
             level=logging.INFO,
             format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
         )
-        self.logger = logging.getLogger(__name__)
         
         # Initialize components
         self.infrastructure_manager = InfrastructureManager(config)

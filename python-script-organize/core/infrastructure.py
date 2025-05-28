@@ -289,78 +289,104 @@ class InfrastructureManager:
                 self.logger.info(f"Successfully created {len(self.tenants)} tenants for throttled setup.")
                 self.stats['tenants_created'] = len(self.tenants)
 
-
                 # Calculate devices per tenant
-                if not self.tenants: # Should not happen if previous check passed
+                if not self.tenants:
                     self.logger.error("Cannot distribute devices as no tenants were created.")
                     return False
 
                 devices_per_tenant = num_devices // len(self.tenants)
                 extra_devices = num_devices % len(self.tenants)
                 
-                total_devices_to_create_count = 0
-                device_creation_tasks = []
+                # Create device distribution plan
+                device_plan = []
+                global_device_index = 0
                 
                 for i, tenant_id in enumerate(self.tenants):
                     tenant_device_count = devices_per_tenant + (1 if i < extra_devices else 0)
                     
                     for device_index_in_tenant in range(tenant_device_count):
-                        # Use a global index for unique device IDs and delay calculation
-                        global_device_index = total_devices_to_create_count 
-                        
-                        # Calculate throttling delay
-                        delay = 0.0
-                        if reporting_manager and hasattr(reporting_manager, 'calculate_registration_delay'):
-                            delay = reporting_manager.calculate_registration_delay(
-                                global_device_index, num_devices
-                            )
-                        elif hasattr(self.config, 'throttling_base_delay'): # Fallback to config if RM not fully equipped
-                            delay = self.config.throttling_base_delay + (global_device_index * 0.01) # Small progressive
-                        else:
-                            delay = 0.1 * global_device_index 
-                        
-                        # Create throttled device creation task
-                        task = self._create_device_with_throttling(
-                            session, # Pass the session
-                            tenant_id, 
-                            global_device_index, # Use global index for device ID
-                            delay, 
-                            reporting_manager
-                        )
-                        device_creation_tasks.append(task)
-                        total_devices_to_create_count +=1
+                        device_plan.append({
+                            'tenant_id': tenant_id,
+                            'global_index': global_device_index,
+                            'device_id': f"device-{global_device_index:04d}"
+                        })
+                        global_device_index += 1
                 
-                # Execute all device creation tasks with throttling
-                device_results = await asyncio.gather(*device_creation_tasks, return_exceptions=True)
-                
-                # Count successful creations
+                # Create devices SEQUENTIALLY with throttling
                 successful_devices: List[Device] = []
-                for result in device_results:
-                    if isinstance(result, Device):
-                        successful_devices.append(result)
-                    elif isinstance(result, Exception):
-                        self.logger.error(f"Device creation failed during throttled setup: {result}", exc_info=True)
+                
+                for i, device_info in enumerate(device_plan):
+                    # Calculate throttling delay
+                    delay = 0.0
+                    if reporting_manager and hasattr(reporting_manager, 'calculate_registration_delay'):
+                        delay = reporting_manager.calculate_registration_delay(
+                            device_info['global_index'], num_devices
+                        )
+                    elif hasattr(self.config, 'throttling_base_delay'):
+                        delay = self.config.throttling_base_delay + (device_info['global_index'] * 0.01)
+                    else:
+                        delay = 0.1 * device_info['global_index']
+                    
+                    # Apply delay BEFORE creating the device (sequential execution)
+                    if delay > 0 and i > 0:  # No delay for the first device
+                        self.logger.debug(f"Applying registration delay of {delay:.2f}s for device {device_info['device_id']}")
+                        await asyncio.sleep(delay)
+                    
+                    # Create device sequentially
+                    try:
+                        device_obj = await self.create_device(
+                            session, 
+                            device_info['tenant_id'], 
+                            device_id_suffix=f"{device_info['global_index']:04d}"
+                        )
+                        
+                        if device_obj:
+                            successful_devices.append(device_obj)
+                            # self.logger.info(f"Device {device_obj.device_id} created in tenant {device_obj.tenant_id}")
+                        
+                        # Record registration metrics
+                        if reporting_manager and hasattr(reporting_manager, 'record_registration_attempt'):
+                            reporting_manager.record_registration_attempt(
+                                device_info['device_id'], delay, device_obj is not None
+                            )
+                            
+                    except Exception as e:
+                        self.logger.error(f"Failed to create device {device_info['device_id']}: {e}")
+                        if reporting_manager and hasattr(reporting_manager, 'record_registration_attempt'):
+                            reporting_manager.record_registration_attempt(
+                                device_info['device_id'], delay, False
+                            )
                 
                 self.devices = successful_devices
                 self.stats['devices_created'] = len(self.devices)
                 self.logger.info(f"Created {len(self.devices)} devices successfully with throttling")
                 
                 if reporting_manager:
-                    # This stat is specific to reporting manager's view of successful registrations
-                    # It might be slightly different if RM's record_registration_attempt has more criteria
                     reporting_manager.stats['devices_registered'] = len(self.devices) 
             
             if not self.devices:
                 self.logger.warning("No devices were created successfully in throttled setup.")
                 return False
 
-            # Validate all created devices
+            # Validate all created devices - Create a NEW session for validation
             self.logger.info("Validating devices with initial telemetry (throttled setup)...")
-            async with aiohttp.ClientSession(connector=connector, timeout=timeout) as validation_session:
-                validation_tasks = [self.validate_device_http(validation_session, device) for device in self.devices]
-                validation_results = await asyncio.gather(*validation_tasks, return_exceptions=True)
+            async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=ssl_context, limit=10), timeout=timeout) as validation_session:
+                
+                successful_validations = 0
+                
+                # Validate devices sequentially with small delays to prevent adapter overload
+                for i, device in enumerate(self.devices):
+                    try:
+                        # Add small delay between validations to prevent 503 errors
+                        if i > 0:
+                            await asyncio.sleep(0.2)  # 200ms delay between validations
+                        
+                        result = await self.validate_device_http(validation_session, device)
+                        if result:
+                            successful_validations += 1
+                    except Exception as e:
+                        self.logger.error(f"Validation exception for device {device.device_id}: {e}")
 
-            successful_validations = sum(1 for r in validation_results if r is True)
             self.logger.info(f"Validation complete (throttled setup): {successful_validations}/{len(self.devices)} devices validated")
 
             if successful_validations == len(self.devices):
@@ -368,7 +394,7 @@ class InfrastructureManager:
             else:
                 self.logger.warning(f"⚠️  Only {successful_validations}/{len(self.devices)} devices validated (throttled setup). Some may fail during load testing.")
             
-            return True # Return True even if not all devices validated, as some might still work
+            return True
             
         except Exception as e:
             self.logger.error(f"Infrastructure setup with throttling failed: {e}", exc_info=True)

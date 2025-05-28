@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 import logging
+import aiohttp
 
 
 @dataclass
@@ -22,11 +23,23 @@ class HonoConfig:
     
     registry_port: int = 28443
     http_adapter_port: int = 8443
+    http_insecure_port: int = 8080
     mqtt_adapter_port: int = 8883
-    mqtt_insecure_port: int = 1883  # Add the insecure MQTT port
+    mqtt_insecure_port: int = 1883
     coap_adapter_port: int = 5684
     amqp_adapter_port: int = 5671
-    lora_adapter_port: int = 8080
+    lora_adapter_port: int = 8085
+    
+    # Registry authentication
+    registry_username: str = "hono-client@HONO"
+    registry_password: str = "secret"
+    
+    # Add registry_auth property for convenience
+    @property
+    def registry_auth(self) -> 'aiohttp.BasicAuth':
+        import aiohttp
+        return aiohttp.BasicAuth(self.registry_username, self.registry_password)
+    
     use_tls: bool = True
     use_mqtt_tls: bool = True  # Separate control for MQTT TLS
     verify_ssl: bool = False
@@ -78,14 +91,16 @@ async def load_config_from_env(config: HonoConfig, env_file: str = "hono.env") -
 
     # Update config from environment variables
     config.registry_ip = os.getenv('REGISTRY_IP', config.registry_ip)
-    config.registry_port = int(os.getenv('REGISTRY_PORT', config.registry_port))
+    config.registry_port = int(os.getenv('REGISTRY_PORT', str(config.registry_port)))
+    config.registry_username = os.getenv('REGISTRY_USERNAME', config.registry_username)
+    config.registry_password = os.getenv('REGISTRY_PASSWORD', config.registry_password)
     
     config.http_adapter_ip = os.getenv('HTTP_ADAPTER_IP', config.http_adapter_ip)
-    config.http_adapter_port = int(os.getenv('HTTP_ADAPTER_PORT', config.http_adapter_port))
+    config.http_adapter_port = int(os.getenv('HTTP_ADAPTER_PORT', str(config.http_adapter_port)))
     
     config.mqtt_adapter_ip = os.getenv('MQTT_ADAPTER_IP', config.mqtt_adapter_ip)
-    config.mqtt_adapter_port = int(os.getenv('MQTT_ADAPTER_PORT', config.mqtt_adapter_port))
-    config.mqtt_insecure_port = int(os.getenv('MQTT_INSECURE_PORT', config.mqtt_insecure_port))
+    config.mqtt_adapter_port = int(os.getenv('MQTT_ADAPTER_PORT', str(config.mqtt_adapter_port)))
+    config.mqtt_insecure_port = int(os.getenv('MQTT_INSECURE_PORT', str(config.mqtt_insecure_port)))
     
     config.coap_adapter_ip = os.getenv('COAP_ADAPTER_IP', config.coap_adapter_ip)
     config.coap_adapter_port = int(os.getenv('COAP_ADAPTER_PORT', config.coap_adapter_port))
@@ -100,8 +115,13 @@ async def load_config_from_env(config: HonoConfig, env_file: str = "hono.env") -
     config.use_tls = os.getenv('USE_TLS', 'true').lower() == 'true'
     config.use_mqtt_tls = os.getenv('USE_MQTT_TLS', os.getenv('USE_TLS', 'true')).lower() == 'true'
     config.verify_ssl = os.getenv('VERIFY_SSL', 'false').lower() == 'true'
-    config.ca_file_path = os.getenv('CA_FILE_PATH')
-      # Client options
+    config.ca_file_path = os.getenv('CA_FILE_PATH', config.ca_file_path) 
+    
+    # Re-run post_init if ca_file_path was not set by env, to allow default search
+    if not os.getenv('CA_FILE_PATH') and config.ca_file_path is None:
+        config.__post_init__() # Allow default search if not set by env
+    
+    # Client options
     config.curl_options = os.getenv('CURL_OPTIONS', config.curl_options)
     config.mosquitto_options = os.getenv('MOSQUITTO_OPTIONS', config.mosquitto_options)
     config.http_timeout = int(os.getenv('HTTP_TIMEOUT', config.http_timeout))
@@ -116,3 +136,7 @@ async def load_config_from_env(config: HonoConfig, env_file: str = "hono.env") -
     logger.info(f"Loaded configuration: Registry={config.registry_ip}:{config.registry_port}")
     logger.info(f"MQTT: {config.mqtt_adapter_ip}:{config.mqtt_adapter_port} (TLS: {config.use_mqtt_tls})")
     logger.info(f"HTTP: {config.http_adapter_ip}:{config.http_adapter_port}")
+    if config.ca_file_path:
+        logger.info(f"CA File Path: {config.ca_file_path} (Exists: {Path(config.ca_file_path).exists() if config.ca_file_path else 'N/A'})")
+    else:
+        logger.warning("CA File Path is not set.")
