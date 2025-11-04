@@ -1,0 +1,18 @@
+{
+  "server": {
+    "registry_ip": "hono.eclipseprojects.io",
+    "registry_port": 28443
+  },
+  "cached_at": "2025-11-04T17:37:58.710571",
+  "tenants": [
+    "ca7f4eab-ff82-46af-9801-b8ecdc16db0d"
+  ],
+  "devices": [
+    {
+      "device_id": "device-85dc0c171e9e5428",
+      "tenant_id": "ca7f4eab-ff82-46af-9801-b8ecdc16db0d",
+      "password": "this-is-my-password",
+      "auth_id": "device-85dc0c171e9e5428"
+    }
+  ]
+}
