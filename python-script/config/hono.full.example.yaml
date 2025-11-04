@@ -1,0 +1,389 @@
+# ============================================
+# Custom Test Configuration Template
+# ============================================
+# Copy this file and customize it for your specific test scenarios!
+# 
+# USAGE:
+#   1. Copy this file: cp hono.full.example.yaml my-test.yaml
+#   2. Modify the values below
+#   3. Run: python stress.py --config-file config/my-test.yaml --profile my-custom-test
+#
+# OR add your profile to hono.yaml under the 'profiles' section
+
+# -----------------
+# Server Settings
+# -----------------
+# Configure your Hono server endpoints here
+server:
+  registry:
+    host: hono.eclipseprojects.io  # Hono device registry hostname
+    port: 28443                     # Hono device registry port (usually 28443)
+  
+  adapters:
+    # HTTP Adapter - for REST API communication
+    http:
+      host: hono.eclipseprojects.io
+      port: 8443                    # HTTPS port (usually 8443)
+    
+    # MQTT Adapter - for MQTT protocol communication
+    mqtt:
+      host: hono.eclipseprojects.io
+      port: 8883                    # MQTT over TLS port (usually 8883)
+    
+    # CoAP Adapter - for CoAP protocol (optional)
+    coap:
+      host: hono.eclipseprojects.io
+      port: 5684                    # CoAP over DTLS port
+    
+    # AMQP Adapter - for AMQP protocol (optional)
+    amqp:
+      host: hono.eclipseprojects.io
+      port: 5671                    # AMQP over TLS port
+    
+    # LoRa Adapter - for LoRaWAN devices (optional)
+    lora:
+      host: hono.eclipseprojects.io
+      port: 8080
+
+# -----------------
+# Security Settings
+# -----------------
+security:
+  use_tls: true                     # Enable TLS for HTTP (HTTPS)
+  use_mqtt_tls: true                # Enable TLS for MQTT (MQTTS)
+  verify_ssl: false                 # Verify SSL certificates (set true in production!)
+  ca_cert_path: ./truststore.pem    # Path to CA certificate file
+  auth_type: hashed-password        # Authentication type: hashed-password, x509, etc.
+  http_timeout: 30                  # HTTP request timeout in seconds
+  mqtt_keepalive: 60                # MQTT keepalive interval in seconds
+
+# -----------------
+# Caching Settings
+# -----------------
+# Device/tenant caching allows reusing infrastructure across test runs
+cache:
+  enabled: true                     # Enable caching (recommended)
+  directory: ./cache                # Directory to store cache files
+  validation_threshold: 0.8         # 80% of devices must be valid to reuse cache
+
+# -----------------
+# Default Test Configuration
+# -----------------
+# These are base defaults when no profile is specified
+test:
+  tenants: 1                        # Number of tenants to create
+  devices: 1                        # TOTAL number of devices (distributed across all tenants)
+  protocols:                        # List of protocols to test
+    - mqtt                          # Options: mqtt, http, coap, amqp
+  message_interval: 10.0            # Seconds between messages (base interval)
+  duration: 60                      # Test duration in seconds (0 = infinite)
+  
+  # Advanced messaging options
+  enable_poisson: false             # Use Poisson distribution for message timing
+  enable_throttling: false          # Enable adaptive throttling for registrations
+  throttling_base_delay: 0.5        # Base delay between registrations (seconds)
+  throttling_jitter: 0.2            # Random jitter to add to delay (seconds)
+
+# -----------------
+# Reporting Settings
+# -----------------
+reporting:
+  enabled: true                     # Generate reports
+  output_directory: ./reports       # Where to save report files
+  generate_graphs: true             # Create graphs and charts
+  save_raw_data: true               # Save raw test data
+  log_level: INFO                   # Logging level: DEBUG, INFO, WARNING, ERROR
+  console_updates: true             # Show live updates in console
+
+# -----------------
+# Resource Limits
+# -----------------
+# Prevent overloading your system or the Hono server
+limits:
+  max_concurrent_connections: 1000  # Maximum simultaneous connections
+  connection_timeout: 30            # Connection timeout in seconds
+  message_queue_size: 10000         # Internal message queue size
+  max_retries: 3                    # Maximum retry attempts on failure
+  retry_delay: 1.0                  # Delay between retries (seconds)
+
+# -----------------
+# Custom Test Profiles
+# -----------------
+# Add your custom test scenarios here!
+# Each profile defines a complete test configuration.
+
+profiles:
+  # ===========================================
+  # EXAMPLE 1: Simple Connectivity Test
+  # ===========================================
+  # Use this for: Quick validation that your setup works
+  my-connectivity-test:
+    description: "Test basic connectivity with minimal load"
+    
+    # How many tenants and devices?
+    tenants: 1              # Start with 1 tenant
+    devices: 1              # And 1 device
+    
+    # Which protocols to test?
+    protocols: [mqtt]       # Just MQTT for simplicity
+    
+    # Message timing
+    message_interval: 30.0  # Send message every 30 seconds
+    duration: 60            # Run for 60 seconds (1 minute)
+    
+    # Notes for documentation
+    notes: "Validates basic connectivity and authentication"
+    
+    # Advanced features (optional)
+    enable_throttling: false
+    enable_poisson: false
+
+  # ===========================================
+  # EXAMPLE 2: Multi-Protocol Test
+  # ===========================================
+  # Use this for: Testing both MQTT and HTTP simultaneously
+  my-multi-protocol-test:
+    description: "Test MQTT and HTTP protocols together"
+    
+    tenants: 2              # 2 tenants
+    devices: 10             # TOTAL: 10 devices (5 per tenant)
+    
+    protocols: [mqtt, http] # Test both protocols
+    
+    message_interval: 10.0  # Message every 10 seconds
+    duration: 300           # Run for 5 minutes
+    
+    notes: "Tests protocol adapter load balancing"
+    
+    # Enable throttling to avoid overwhelming the server
+    enable_throttling: true
+    throttling_base_delay: 0.5
+    throttling_jitter: 0.2
+
+  # ===========================================
+  # EXAMPLE 3: Load Test with Realistic Patterns
+  # ===========================================
+  # Use this for: Simulating real-world device behavior
+  my-realistic-load-test:
+    description: "Realistic load test with variable message timing"
+    
+    tenants: 5              # 5 tenants
+    devices: 100            # TOTAL: 100 devices (20 per tenant)
+    
+    protocols: [mqtt, http] # Both protocols
+    
+    message_interval: 5.0   # Base interval: 5 seconds
+    duration: 1800          # Run for 30 minutes
+    
+    notes: "Simulates real IoT device behavior with Poisson distribution"
+    
+    # Use Poisson distribution for realistic timing
+    enable_poisson: true    # Messages come at irregular intervals
+    
+    # Enable throttling during setup
+    enable_throttling: true
+    throttling_base_delay: 0.5
+    throttling_jitter: 0.2
+
+  # ===========================================
+  # EXAMPLE 4: Stress Test
+  # ===========================================
+  # Use this for: Finding system limits and bottlenecks
+  my-stress-test:
+    description: "Heavy load to test system limits"
+    
+    tenants: 10             # 10 tenants
+    devices: 500            # TOTAL: 500 devices (50 per tenant)
+    
+    protocols: [mqtt, http] # Both protocols under load
+    
+    message_interval: 2.0   # Aggressive: message every 2 seconds
+    duration: 3600          # Run for 1 hour
+    
+    notes: "WARNING: This generates heavy load. Monitor system resources!"
+    
+    # Both advanced features enabled
+    enable_poisson: true
+    enable_throttling: true
+    throttling_base_delay: 0.5
+    throttling_jitter: 0.2
+
+  # ===========================================
+  # EXAMPLE 5: Endurance Test
+  # ===========================================
+  # Use this for: Long-running stability testing
+  my-endurance-test:
+    description: "Long-running stability test"
+    
+    tenants: 3              # Moderate tenant count
+    devices: 45             # TOTAL: 45 devices (15 per tenant)
+    
+    protocols: [mqtt, http]
+    
+    message_interval: 10.0  # Conservative: every 10 seconds
+    duration: 14400         # Run for 4 hours (4 * 60 * 60 = 14400 seconds)
+    
+    notes: "Tests long-term stability and memory leaks"
+    
+    enable_throttling: true
+    enable_poisson: false   # Keep timing predictable for endurance
+
+  # ===========================================
+  # EXAMPLE 6: HTTP-Only Test
+  # ===========================================
+  # Use this for: Testing only HTTP adapter performance
+  my-http-only-test:
+    description: "HTTP adapter performance test"
+    
+    tenants: 5
+    devices: 125            # TOTAL: 125 devices (25 per tenant)
+    
+    protocols: [http]       # ONLY HTTP
+    
+    message_interval: 3.0
+    duration: 600           # 10 minutes
+    
+    notes: "Focused HTTP adapter performance testing"
+    
+    enable_throttling: true
+    enable_poisson: false
+
+  # ===========================================
+  # YOUR CUSTOM TEST - TEMPLATE
+  # ===========================================
+  # Copy this section and customize it!
+  my-custom-test:
+    # Short description (1 line)
+    description: "My custom test scenario"
+    
+    # Infrastructure settings
+    tenants: 1              # How many tenants? (1-100 typical)
+    devices: 1              # How many devices per tenant? (1-1000 typical)
+    
+    # Protocol selection
+    # Options: mqtt, http, coap, amqp, lora
+    # You can specify one or multiple protocols
+    protocols: [mqtt]       
+    
+    # Message timing
+    message_interval: 10.0  # Seconds between messages (0.1 - 60 typical)
+    duration: 60            # Total test duration in seconds
+                           # 60 = 1 minute
+                           # 300 = 5 minutes
+                           # 600 = 10 minutes
+                           # 3600 = 1 hour
+                           # 0 = run forever (until Ctrl+C)
+    
+    # Documentation
+    notes: "Describe what this test does and when to use it"
+    
+    # Advanced features (optional - delete if not needed)
+    
+    # Poisson distribution: Makes message timing more realistic
+    # Messages arrive at irregular intervals like real IoT devices
+    enable_poisson: false   # Set to true for realistic timing
+    
+    # Registration throttling: Prevents overwhelming server during setup
+    # Adds delays when creating many devices
+    enable_throttling: false        # Set to true for large tests
+    throttling_base_delay: 0.5      # Base delay (seconds)
+    throttling_jitter: 0.2          # Random variation (seconds)
+
+# -----------------
+# Advanced Features
+# -----------------
+# Fine-tune performance and behavior
+advanced:
+  message_payload_size: 256         # Message size in bytes
+  message_format: json              # Payload format: json, binary, etc.
+  connection_pool_size: 100         # Connection pool size
+  connection_reuse: true            # Reuse connections (recommended)
+  stop_on_error: false              # Stop test on first error
+  error_threshold: 0.1              # Stop if error rate > 10%
+  async_batch_size: 100             # Async operation batch size
+  worker_threads: 4                 # Number of worker threads
+
+# -----------------
+# Monitoring
+# -----------------
+# Track system performance during tests
+monitoring:
+  enable_metrics: true              # Enable metrics collection
+  metrics_interval: 5               # Update metrics every N seconds
+  track_memory: true                # Monitor memory usage
+  track_cpu: true                   # Monitor CPU usage
+  track_network: false              # Monitor network (requires permissions)
+
+# ============================================
+# QUICK REFERENCE: Common Test Scenarios
+# ============================================
+#
+# SMOKE TEST (Basic Connectivity):
+#   tenants: 1, devices: 1, protocols: [mqtt], duration: 60
+#   Use: Initial setup validation
+#
+# LIGHT LOAD TEST:
+#   tenants: 3, devices: 10, protocols: [mqtt, http], duration: 300
+#   Use: CI/CD pipeline testing
+#
+# MODERATE LOAD TEST:
+#   tenants: 5, devices: 20, protocols: [mqtt, http], duration: 600
+#   Use: Pre-production validation
+#
+# STRESS TEST:
+#   tenants: 10, devices: 50+, protocols: [mqtt, http], duration: 1800+
+#   Use: Finding system limits
+#
+# ENDURANCE TEST:
+#   tenants: 3-5, devices: 15-25, duration: 7200+ (2+ hours)
+#   Use: Long-term stability validation
+#
+# ============================================
+# PARAMETER GUIDELINES
+# ============================================
+#
+# TENANTS:
+#   - Small test: 1-3 tenants
+#   - Medium test: 5-10 tenants
+#   - Large test: 10+ tenants
+#
+# DEVICES:
+#   - Per tenant, not total
+#   - Small: 1-10 devices
+#   - Medium: 10-50 devices
+#   - Large: 50+ devices
+#   - Total devices = tenants × devices
+#
+# MESSAGE_INTERVAL:
+#   - Very fast: 0.5-2 seconds (stress testing)
+#   - Fast: 2-5 seconds (load testing)
+#   - Normal: 5-10 seconds (realistic)
+#   - Slow: 10-30 seconds (endurance)
+#   - Very slow: 30+ seconds (minimal load)
+#
+# DURATION:
+#   - Quick: 60-300 seconds (1-5 minutes)
+#   - Standard: 300-1800 seconds (5-30 minutes)
+#   - Long: 1800-7200 seconds (30 min - 2 hours)
+#   - Endurance: 7200+ seconds (2+ hours)
+#
+# PROTOCOLS:
+#   - mqtt: Most common IoT protocol, lightweight
+#   - http: REST API, widely supported
+#   - coap: Constrained devices, UDP-based
+#   - amqp: Enterprise messaging
+#   - Multiple: [mqtt, http] tests both simultaneously
+#
+# ENABLE_POISSON:
+#   - false: Regular intervals (predictable)
+#   - true: Variable intervals (realistic)
+#   - Use true for: Realistic simulations
+#   - Use false for: Benchmark/stress tests
+#
+# ENABLE_THROTTLING:
+#   - false: Create all devices quickly
+#   - true: Spread device creation over time
+#   - Use true for: Large tests (20+ devices)
+#   - Use false for: Small quick tests
+#
+# ============================================

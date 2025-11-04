@@ -5,15 +5,42 @@
 global:
   imagePullSecrets: []
   
-# Test configuration
+# ============================================
+# Profile-based Test Configuration (NEW!)
+# ============================================
+# Use predefined profiles from config/hono.yaml
+# Available profiles: smoke, standard, stress
+profile: smoke
+
+# Optional overrides (leave empty to use profile defaults)
+overrides:
+  tenants: ""      # Override number of tenants
+  devices: ""      # Override total number of devices
+  protocols: ""    # Override protocols (e.g., "mqtt" or "mqtt,http")
+  messageInterval: ""  # Override message interval in seconds
+  duration: ""     # Override test duration in seconds
+
+# Caching configuration
+cache:
+  enabled: true         # Enable device/tenant caching
+  clear: false         # Clear cache before running
+  storageClass: ""     # Use default storage class
+  size: 1Gi            # Cache volume size
+
+# ============================================
+# Legacy Configuration (Deprecated)
+# ============================================
+# These are kept for backwards compatibility
+# Use 'profile' and 'overrides' instead
 test:
   tenantCount: 5
   deviceCount: 100
   protocols: "mqtt,http"
-  messageType: "telemetry"  # telemetry or event
-  messageInterval: 10  # seconds
+  messageType: "telemetry"
+  messageInterval: 10
   
 # Hono endpoints configuration
+# Note: Server settings are now in ConfigMap (from config/hono.yaml)
 hono:
   registryIp: "hono.eclipseprojects.io"
   registryPort: 28443
@@ -87,6 +114,19 @@ persistence:
   accessMode: ReadWriteOnce
   size: 1Gi
   storageClass: ""  # Use default storage class
+
+# Cache persistence (NEW!)
+cachePersistence:
+  enabled: true
+  accessMode: ReadWriteOnce
+  size: 500Mi
+  storageClass: ""  # Use default storage class
+
+# Reports output (NEW!)
+reports:
+  enabled: true
+  storageClass: ""
+  size: 2Gi
 
 # Security context
 securityContext:

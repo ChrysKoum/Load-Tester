@@ -5,29 +5,36 @@
    Namespace: {{ .Release.Namespace }}
    Chart: {{ .Chart.Name }}-{{ .Chart.Version }}
 
-🔧 Configuration:
-   • Tenants: {{ .Values.test.tenantCount }}
-   • Devices: {{ .Values.test.deviceCount }}
-   • Protocols: {{ .Values.test.protocols }}
-   • Message Interval: {{ .Values.test.messageInterval }}s
+🎯 Test Configuration:
+   • Profile: {{ .Values.profile }}
+{{- if .Values.overrides.tenants }}
+   • Tenants: {{ .Values.overrides.tenants }} (overridden)
+{{- end }}
+{{- if .Values.overrides.devices }}
+   • Devices: {{ .Values.overrides.devices }} total (overridden)
+{{- end }}
+{{- if .Values.overrides.protocols }}
+   • Protocols: {{ .Values.overrides.protocols }} (overridden)
+{{- end }}
+   • Caching: {{ if .Values.cache.enabled }}Enabled{{ else }}Disabled{{ end }}
    • Hono Registry: {{ .Values.hono.registryIp }}:{{ .Values.hono.registryPort }}
 
 📊 Services:
 {{- if .Values.registrar.enabled }}
-   ✅ Registrar: Creates tenants and devices
+   ✅ Registrar: Creates tenants and devices (with caching)
 {{- end }}
 {{- if .Values.validator.enabled }}
-   ✅ Validator: Validates HTTP connectivity
+   ✅ Validator: Validates device connectivity
 {{- end }}
 {{- if .Values.loadgen.enabled }}
-   ✅ Load Generator: Runs load tests ({{ .Values.loadgen.replicas }} replicas)
+   ✅ Load Generator: Runs load tests
 {{- end }}
 
 🔍 Monitor Progress:
    # Check job status
    kubectl get jobs -n {{ .Release.Namespace }} -l app.kubernetes.io/instance={{ .Release.Name }}
    
-   # Check pod logs
+   # Watch all logs
    kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/instance={{ .Release.Name }} -f
    
    # Check specific service logs
@@ -36,17 +43,46 @@
    kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/component=loadgen -f
 
 {{- if .Values.persistence.enabled }}
-📁 Shared Data:
-   PVC: {{ include "hono-load-test.pvcName" . }}
+📁 Storage:
+   • Shared Data: {{ include "hono-load-test.pvcName" . }}
+{{- if .Values.cachePersistence.enabled }}
+   • Cache: {{ include "hono-load-test.fullname" . }}-cache
+{{- end }}
+{{- if .Values.reports.enabled }}
+   • Reports: {{ include "hono-load-test.fullname" . }}-reports
+{{- end }}
    
-   # Check shared data
-   kubectl exec -n {{ .Release.Namespace }} -it $(kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/component=loadgen -o jsonpath='{.items[0].metadata.name}') -- ls -la /shared-data
+   # Access reports
+   kubectl exec -n {{ .Release.Namespace }} -it \
+     $(kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/component=loadgen -o jsonpath='{.items[0].metadata.name}') \
+     -- ls -la /app/reports
 {{- end }}
 
 ⏱️  Execution Order:
-   1. Registrar creates tenants and devices
-   2. Validator tests HTTP connectivity
-   3. Load Generator starts multi-protocol testing
+   1. Registrar: Creates/reuses cached tenants and devices
+   2. Validator: Validates device connectivity
+   3. Load Generator: Runs profile-based load test
+
+💡 Quick Commands:
+   # View test results
+   kubectl logs -n {{ .Release.Namespace }} job/{{ .Release.Name }}-loadgen
+
+   # Copy reports to local
+   kubectl cp -n {{ .Release.Namespace }} \
+     $(kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/component=loadgen -o jsonpath='{.items[0].metadata.name}'):/app/reports \
+     ./reports
+
+   # Cleanup
+   helm uninstall {{ .Release.Name }}
+
+📖 Available Profiles:
+   - smoke: Quick test (1 tenant, 1 device, mqtt, 60s)
+   - standard: Standard test (5 tenants, 100 devices, mqtt+http, 600s)
+   - stress: Heavy test (10 tenants, 500 devices, mqtt+http, 1800s)
+
+🎯 Run Different Profiles:
+   helm upgrade {{ .Release.Name }} ./chart --set profile=standard
+   helm upgrade {{ .Release.Name }} ./chart --set profile=stress
 
 🎯 Test Scenarios Available:
    • Use "--set test.deviceCount=10 --set test.messageInterval=5.75" for "10fast" scenario

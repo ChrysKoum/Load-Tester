@@ -1,0 +1,159 @@
+# ============================================
+# Hono Load Test Configuration
+# ============================================
+# Single configuration file for all test settings
+# This file works for both Python script and Docker deployments
+
+# -----------------
+# Server Settings
+# -----------------
+server:
+  registry:
+    host: hono.eclipseprojects.io
+    port: 28443
+  
+  adapters:
+    http:
+      host: hono.eclipseprojects.io
+      port: 8443
+    mqtt:
+      host: hono.eclipseprojects.io
+      port: 8883
+    coap:
+      host: hono.eclipseprojects.io
+      port: 5684
+    amqp:
+      host: hono.eclipseprojects.io
+      port: 5671
+    lora:
+      host: hono.eclipseprojects.io
+      port: 8080
+
+# -----------------
+# Security Settings
+# -----------------
+security:
+  use_tls: true
+  use_mqtt_tls: true
+  verify_ssl: false
+  ca_cert_path: ./truststore.pem
+  auth_type: hashed-password
+  http_timeout: 30
+  mqtt_keepalive: 60
+
+# -----------------
+# Caching Settings
+# -----------------
+cache:
+  enabled: true
+  directory: ./cache
+  validation_threshold: 0.8  # 80% devices must be valid to reuse cache
+
+# -----------------
+# Default Test Configuration
+# -----------------
+# These are the base defaults used when no profile is specified
+test:
+  tenants: 1
+  devices: 1
+  protocols:
+    - mqtt
+  message_interval: 10.0  # seconds between messages
+  duration: 60  # seconds (0 = run indefinitely)
+  
+  # Advanced options
+  enable_poisson: false
+  enable_throttling: false
+  throttling_base_delay: 0.5
+  throttling_jitter: 0.2
+
+# -----------------
+# Reporting Settings
+# -----------------
+reporting:
+  enabled: true
+  output_directory: ./reports
+  generate_graphs: true
+  save_raw_data: true
+  log_level: INFO
+  console_updates: true  # Show live updates in console
+
+# -----------------
+# Resource Limits
+# -----------------
+limits:
+  max_concurrent_connections: 1000
+  connection_timeout: 30
+  message_queue_size: 10000
+  max_retries: 3
+  retry_delay: 1.0
+
+# -----------------
+# Named Test Profiles
+# -----------------
+# Only 3 essential profiles are provided here.
+# For custom tests, copy test-custom.yaml and modify it!
+
+profiles:
+  # Profile 1: Quick Connectivity Test
+  smoke:
+    description: "Quick connectivity check"
+    tenants: 1              # Number of tenants
+    devices: 1              # Total devices (distributed across tenants)
+    protocols: [mqtt]
+    message_interval: 30.0
+    duration: 60
+    notes: "Perfect for initial setup validation - creates 1 device in 1 tenant"
+  
+  # Profile 2: Standard Load Test
+  standard:
+    description: "Standard production load test"
+    tenants: 5              # Number of tenants
+    devices: 100            # Total devices (20 devices per tenant)
+    protocols: [mqtt, http]
+    message_interval: 5.0
+    duration: 600
+    notes: "Standard load with 100 total devices distributed across 5 tenants"
+    enable_throttling: true
+  
+  # Profile 3: Stress Test
+  stress:
+    description: "Heavy stress test"
+    tenants: 10             # Number of tenants
+    devices: 500            # Total devices (50 devices per tenant)
+    protocols: [mqtt, http]
+    message_interval: 2.0
+    duration: 1800
+    notes: "Stress test with 500 total devices distributed across 10 tenants"
+    enable_throttling: true
+    enable_poisson: true
+
+# -----------------
+# Advanced Features
+# -----------------
+advanced:
+  # Message generation
+  message_payload_size: 256  # bytes
+  message_format: json
+  
+  # Connection management
+  connection_pool_size: 100
+  connection_reuse: true
+  
+  # Error handling
+  stop_on_error: false
+  error_threshold: 0.1  # Stop if error rate > 10%
+  
+  # Performance tuning
+  async_batch_size: 100
+  worker_threads: 4
+
+# -----------------
+# Monitoring
+# -----------------
+monitoring:
+  enable_metrics: true
+  metrics_interval: 5  # seconds
+  track_memory: true
+  track_cpu: true
+  track_network: false  # May require elevated permissions

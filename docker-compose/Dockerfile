@@ -12,8 +12,11 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the working python-script-organize code structure
-COPY python-script-organize/ ./
+# Copy the FIXED python-script code structure
+COPY ../python-script/config ./config
+COPY ../python-script/core ./core
+COPY ../python-script/models ./models
+COPY ../python-script/utils ./utils
 
 # Copy Docker-specific service entry points
 COPY docker-services/ ./docker-services/
@@ -21,8 +24,9 @@ COPY docker-services/ ./docker-services/
 # Copy shared utilities
 COPY shared/ ./shared/
 
-# Create shared directory for data exchange between services
-RUN mkdir -p /app/shared && chmod 777 /app/shared
+# Create necessary directories
+RUN mkdir -p /app/shared /app/cache /app/reports /app/logs && \
+    chmod -R 777 /app/shared /app/cache /app/reports /app/logs
 
 # Default command (will be overridden by docker-compose)
 CMD ["python", "-c", "print('Hono Load Test Container - Specify service command')"]

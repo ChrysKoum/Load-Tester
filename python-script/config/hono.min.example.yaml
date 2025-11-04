@@ -1,0 +1,44 @@
+# ============================================
+# Hono Load Test - MINIMAL Configuration
+# ============================================
+# This is the absolute minimum required configuration.
+# Copy this to hono.yaml and customize the server endpoints.
+
+# -----------------
+# Server Settings (REQUIRED)
+# -----------------
+server:
+  registry:
+    host: hono.eclipseprojects.io    # Change to your Hono server
+    port: 28443
+  
+  adapters:
+    http:
+      host: hono.eclipseprojects.io  # Change to your Hono server
+      port: 8443
+    mqtt:
+      host: hono.eclipseprojects.io  # Change to your Hono server
+      port: 8883
+
+# -----------------
+# Security Settings
+# -----------------
+security:
+  use_tls: true
+  verify_ssl: false                  # Set to true in production with valid certs
+  ca_cert_path: ./truststore.pem
+
+# -----------------
+# Test Profiles (At least one required)
+# -----------------
+profiles:
+  smoke:
+    description: "Quick test"
+    tenants: 1        # Number of tenants
+    devices: 1        # Total devices (distributed across tenants)
+    protocols: [mqtt]
+    message_interval: 30.0
+    duration: 60
+
+# That's it! Everything else uses sensible defaults.
+# For more options, see hono.example.yaml or hono.yaml

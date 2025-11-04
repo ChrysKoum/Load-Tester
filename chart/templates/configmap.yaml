@@ -5,6 +5,11 @@ metadata:
   labels:
     {{- include "hono-load-test.labels" . | nindent 4 }}
 data:
+  # NEW: Profile-based configuration file
+  hono.yaml: |
+{{ .Files.Get "config/hono.yaml" | indent 4 }}
+  
+  # Legacy environment variables (deprecated, kept for backwards compatibility)
   hono.env: |
     # Hono Eclipse IoT endpoints configuration
     HONO_REGISTRY_IP={{ .Values.hono.registryIp }}
@@ -23,13 +28,34 @@ data:
     VERIFY_SSL={{ .Values.hono.verifySsl }}
     MESSAGING_TYPE={{ .Values.hono.messagingType }}
     
-    # Test configuration
+    # Test configuration (legacy - use profile instead)
     TENANT_COUNT={{ .Values.test.tenantCount }}
     DEVICE_COUNT={{ .Values.test.deviceCount }}
     PROTOCOLS={{ .Values.test.protocols }}
     MESSAGE_TYPE={{ .Values.test.messageType }}
     MESSAGE_INTERVAL={{ .Values.test.messageInterval }}
     LOG_LEVEL={{ .Values.logging.level }}
+    
+    # NEW: Profile-based config
+    PROFILE={{ .Values.profile }}
+    {{- if .Values.overrides.tenants }}
+    TENANTS={{ .Values.overrides.tenants }}
+    {{- end }}
+    {{- if .Values.overrides.devices }}
+    DEVICES={{ .Values.overrides.devices }}
+    {{- end }}
+    {{- if .Values.overrides.protocols }}
+    PROTOCOLS={{ .Values.overrides.protocols }}
+    {{- end }}
+    {{- if .Values.overrides.messageInterval }}
+    MESSAGE_INTERVAL={{ .Values.overrides.messageInterval }}
+    {{- end }}
+    {{- if .Values.overrides.duration }}
+    DURATION={{ .Values.overrides.duration }}
+    {{- end }}
+    USE_CACHE={{ .Values.cache.enabled }}
+    CLEAR_CACHE={{ .Values.cache.clear }}
+    CONFIG_FILE=/app/config/hono.yaml
     
     # Internal service coordination
     SHARED_DATA_PATH=/shared-data

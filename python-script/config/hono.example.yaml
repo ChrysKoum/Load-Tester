@@ -1,0 +1,148 @@
+# ============================================
+# Hono Load Test Configuration - EXAMPLE
+# ============================================
+# Copy this file to hono.yaml and customize for your needs
+# This file works for both Python script and Docker deployments
+
+# -----------------
+# Server Settings
+# -----------------
+# Replace with your Hono server endpoints
+server:
+  registry:
+    host: hono.eclipseprojects.io  # Your Hono registry host
+    port: 28443                     # Registry port
+  
+  adapters:
+    http:
+      host: hono.eclipseprojects.io
+      port: 8443
+    mqtt:
+      host: hono.eclipseprojects.io
+      port: 8883
+    coap:
+      host: hono.eclipseprojects.io
+      port: 5684
+    amqp:
+      host: hono.eclipseprojects.io
+      port: 5671
+    lora:
+      host: hono.eclipseprojects.io
+      port: 8080
+
+# -----------------
+# Security Settings
+# -----------------
+security:
+  use_tls: true
+  use_mqtt_tls: true
+  verify_ssl: false                # Set to true in production!
+  ca_cert_path: ./truststore.pem   # Path to CA certificate
+  auth_type: hashed-password
+  http_timeout: 30
+  mqtt_keepalive: 60
+
+# -----------------
+# Caching Settings
+# -----------------
+cache:
+  enabled: true                    # Set to false to disable caching
+  directory: ./cache               # Where to store cached devices
+  validation_threshold: 0.8        # Minimum valid devices ratio (80%)
+
+# -----------------
+# Default Test Configuration
+# -----------------
+test:
+  tenants: 1
+  devices: 1
+  protocols:
+    - mqtt                         # Options: mqtt, http, coap, amqp
+  message_interval: 10.0
+  duration: 60                     # seconds (0 = run indefinitely)
+  
+  enable_poisson: false            # Use Poisson distribution for message timing
+  enable_throttling: false         # Enable adaptive throttling
+  throttling_base_delay: 0.5
+  throttling_jitter: 0.2
+
+# -----------------
+# Reporting Settings
+# -----------------
+reporting:
+  enabled: true
+  output_directory: ./reports
+  generate_graphs: true
+  save_raw_data: true
+  log_level: INFO                  # DEBUG, INFO, WARNING, ERROR
+  console_updates: true
+
+# -----------------
+# Resource Limits
+# -----------------
+limits:
+  max_concurrent_connections: 1000
+  connection_timeout: 30
+  message_queue_size: 10000
+  max_retries: 3
+  retry_delay: 1.0
+
+# -----------------
+# Named Test Profiles
+# -----------------
+# Only 3 essential profiles - keep it simple!
+# For custom tests, see test-custom.yaml
+
+profiles:
+  # Quick connectivity check
+  smoke:
+    description: "Quick connectivity check"
+    tenants: 1              # Number of tenants
+    devices: 1              # TOTAL devices (distributed across tenants)
+    protocols: [mqtt]
+    message_interval: 30.0
+    duration: 60
+    
+  # Standard load test
+  standard:
+    description: "Standard load test"
+    tenants: 5              # Number of tenants
+    devices: 100            # TOTAL devices (20 per tenant)
+    protocols: [mqtt, http]
+    message_interval: 5.0
+    duration: 600
+    enable_throttling: true
+    
+  # Heavy stress test
+  stress:
+    description: "Heavy stress test"
+    tenants: 10             # Number of tenants
+    devices: 500            # TOTAL devices (50 per tenant)
+    protocols: [mqtt, http]
+    message_interval: 2.0
+    duration: 1800
+    enable_throttling: true
+    enable_poisson: true
+
+# -----------------
+# Advanced Features
+# -----------------
+advanced:
+  message_payload_size: 256
+  message_format: json
+  connection_pool_size: 100
+  connection_reuse: true
+  stop_on_error: false
+  error_threshold: 0.1
+  async_batch_size: 100
+  worker_threads: 4
+
+# -----------------
+# Monitoring
+# -----------------
+monitoring:
+  enable_metrics: true
+  metrics_interval: 5
+  track_memory: true
+  track_cpu: true
+  track_network: false

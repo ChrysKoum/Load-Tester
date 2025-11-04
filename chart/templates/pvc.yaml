@@ -15,3 +15,41 @@ spec:
   storageClassName: {{ .Values.persistence.storageClass }}
   {{- end }}
 {{- end }}
+---
+{{- if .Values.cachePersistence.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "hono-load-test.fullname" . }}-cache
+  labels:
+    {{- include "hono-load-test.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cache
+spec:
+  accessModes:
+    - {{ .Values.cachePersistence.accessMode }}
+  resources:
+    requests:
+      storage: {{ .Values.cachePersistence.size }}
+  {{- if .Values.cachePersistence.storageClass }}
+  storageClassName: {{ .Values.cachePersistence.storageClass }}
+  {{- end }}
+{{- end }}
+---
+{{- if .Values.reports.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "hono-load-test.fullname" . }}-reports
+  labels:
+    {{- include "hono-load-test.labels" . | nindent 4 }}
+    app.kubernetes.io/component: reports
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.reports.size }}
+  {{- if .Values.reports.storageClass }}
+  storageClassName: {{ .Values.reports.storageClass }}
+  {{- end }}
+{{- end }}

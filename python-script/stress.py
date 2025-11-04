@@ -865,18 +865,28 @@ def main():
     # Argument parsing
     parser = argparse.ArgumentParser(description="Hono Load Test Suite - Comprehensive Test Modes with Advanced Features")
     
-    # Core arguments
-    parser.add_argument("--env-file", default="../hono.env", help="Path to the .env file for Hono configuration.")
+    # NEW: Config file and profile support
+    parser.add_argument("--config-file", default="config/hono.yaml", help="Path to the YAML configuration file.")
+    parser.add_argument("--profile", help="Test profile name from config file (replaces --test-mode).")
+    parser.add_argument("--list-profiles", action="store_true", help="List all available profiles from config and exit.")
+    parser.add_argument("--show-profile", help="Show details of a specific profile and exit.")
+    
+    # Core arguments (now optional - can come from profile)
+    parser.add_argument("--env-file", default="../hono.env", help="Path to the .env file for Hono configuration (legacy).")
     parser.add_argument("--log-level", default="INFO", choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'], help="Console logging level.")
     parser.add_argument("--report", action="store_true", help="Generate a detailed test report.")
-    parser.add_argument("--duration", type=int, default=60, help="Test duration in seconds.")
-    parser.add_argument("--message-interval", type=float, default=1.0, help="Base interval between messages in seconds.")
-    parser.add_argument("--devices", type=int, default=10, help="Number of devices to simulate.")
-    parser.add_argument("--tenants", type=int, default=1, help="Number of tenants.")
-    parser.add_argument("--protocols", nargs='+', default=["mqtt", "http"], help="Protocols to test (mqtt, http, amqp, coap).")
-    parser.add_argument("--mode", choices=["10fast", "100slow", "custom"], default="10fast", help="Legacy test mode.")
-    parser.add_argument("--test-mode", help="Pre-configured test mode name.")
-    parser.add_argument("--list-modes", action="store_true", help="List all available test modes and exit.")
+    parser.add_argument("--duration", type=int, help="Test duration in seconds (overrides profile).")
+    parser.add_argument("--message-interval", type=float, help="Base interval between messages in seconds (overrides profile).")
+    parser.add_argument("--devices", type=int, help="Number of devices to simulate (overrides profile).")
+    parser.add_argument("--tenants", type=int, help="Number of tenants (overrides profile).")
+    parser.add_argument("--protocols", nargs='+', help="Protocols to test: mqtt, http, amqp, coap (overrides profile).")
+    
+    # Legacy support (deprecated)
+    parser.add_argument("--mode", choices=["10fast", "100slow", "custom"], default="custom", help="Legacy test mode (deprecated, use --profile).")
+    parser.add_argument("--test-mode", help="Pre-configured test mode name (deprecated, use --profile).")
+    parser.add_argument("--list-modes", action="store_true", help="List all available test modes and exit (deprecated, use --list-profiles).")
+    
+    # Remaining arguments
     parser.add_argument("--validate-registration", action="store_true", help="Validate device registration with Hono.")
     parser.add_argument("--monitor-interval", type=int, default=10, help="Interval in seconds for printing live stats to console (0 to disable).")
     parser.add_argument("--enable-poisson", action="store_true", help="Enable Poisson distribution for message intervals.")
@@ -885,11 +895,9 @@ def main():
     parser.add_argument("--enable-throttling", action="store_true", help="Enable registration throttling.")
     parser.add_argument("--throttling-base-delay", type=float, default=0.5, help="Base delay for registration throttling.")
     parser.add_argument("--throttling-jitter", type=float, default=0.2, help="Jitter for registration throttling.")
-    
-    # Add missing arguments that print_startup_info expects
     parser.add_argument("--max-duration", type=float, help="Maximum test duration in hours (for endurance tests).")
     parser.add_argument("--auto-stop", action="store_true", help="Enable automatic stopping based on test mode duration.")
-    parser.add_argument("--interval", type=float, default=10.0, help="Message interval in seconds.")
+    parser.add_argument("--interval", type=float, help="Message interval in seconds (alias for --message-interval).")
     parser.add_argument("--kind", default="telemetry", help="Message kind/type.")
     parser.add_argument("--setup-only", action="store_true", help="Only setup infrastructure, don't run load test.")
     parser.add_argument("--mqtt-insecure", action="store_true", help="Disable MQTT TLS.")
@@ -913,6 +921,33 @@ def main():
     parser.add_argument("--clear-cache", action="store_true", help="Clear cached devices for the current server and exit.")
 
     args = parser.parse_args()
+    
+    # Handle profile listing/showing first (before loading config)
+    if args.list_profiles or args.list_modes:
+        try:
+            from config.config_loader import ConfigLoader
+            config_loader = ConfigLoader(args.config_file)
+            config_loader.print_summary()
+            sys.exit(0)
+        except FileNotFoundError as e:
+            print(f"❌ Config file not found: {e}")
+            print(f"💡 Using legacy test modes instead...")
+            if args.list_modes:
+                list_all_modes()
+            sys.exit(1)
+        except Exception as e:
+            print(f"❌ Error loading config: {e}")
+            sys.exit(1)
+    
+    if args.show_profile:
+        try:
+            from config.config_loader import ConfigLoader
+            config_loader = ConfigLoader(args.config_file)
+            print(config_loader.get_profile_info(args.show_profile))
+            sys.exit(0)
+        except Exception as e:
+            print(f"❌ Error: {e}")
+            sys.exit(1)
 
     # Create a unique timestamped directory for this test run's outputs
     run_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -960,30 +995,129 @@ def main():
     reporting_manager.registration_config['registration_delay_jitter'] = args.throttling_jitter
 
 
-    # Handle test mode selection
+    # Handle profile or test mode selection
     selected_mode_config = None
-    if args.list_modes:
-        list_all_modes()
-        sys.exit(0)
+    profile_config = None
     
-    if args.test_mode:
-        selected_mode_config = get_mode_config(args.test_mode)
-        if not selected_mode_config:
-            main_logger.error(f"Test mode '{args.test_mode}' not found. Use --list-modes to see available modes.")
+    # NEW: Try loading from YAML config first (if --profile specified)
+    if args.profile:
+        try:
+            from config.config_loader import ConfigLoader
+            config_loader = ConfigLoader(args.config_file)
+            
+            # Get profile with CLI overrides
+            profile_config = config_loader.get_full_config(
+                args.profile,
+                devices=args.devices,
+                tenants=args.tenants,
+                protocols=','.join(args.protocols) if args.protocols else None,
+                message_interval=args.message_interval,
+                duration=args.duration,
+                enable_poisson=args.enable_poisson if args.enable_poisson else None,
+                enable_throttling=args.enable_throttling if args.enable_throttling else None,
+            )
+            
+            # Apply profile settings to args
+            test_settings = profile_config['test']
+            args.devices = test_settings.get('devices', 1)
+            args.tenants = test_settings.get('tenants', 1)
+            args.protocols = test_settings.get('protocols', ['mqtt'])
+            args.message_interval = test_settings.get('message_interval', 10.0)
+            if args.interval is None:
+                args.interval = args.message_interval
+            if args.duration is None:
+                args.duration = test_settings.get('duration', 60)
+            
+            # Advanced features from profile
+            if not args.enable_poisson:
+                args.enable_poisson = test_settings.get('enable_poisson', False)
+            if not args.enable_throttling:
+                args.enable_throttling = test_settings.get('enable_throttling', False)
+            if test_settings.get('throttling_base_delay'):
+                args.throttling_base_delay = test_settings['throttling_base_delay']
+            if test_settings.get('throttling_jitter'):
+                args.throttling_jitter = test_settings['throttling_jitter']
+            
+            main_logger.info(f"✅ Loaded profile: {args.profile}")
+            if 'description' in test_settings:
+                main_logger.info(f"   Description: {test_settings['description']}")
+            
+        except FileNotFoundError:
+            main_logger.warning(f"⚠️  Config file not found: {args.config_file}")
+            main_logger.warning(f"   Falling back to legacy test modes...")
+            args.profile = None  # Fall through to legacy mode
+        except ValueError as e:
+            main_logger.error(f"❌ {e}")
             sys.exit(1)
-        # Override args with mode config if applicable (this part needs careful implementation)
-        args.devices = selected_mode_config.devices
-        args.tenants = selected_mode_config.tenants
-        args.protocols = selected_mode_config.protocols
-        args.message_interval = selected_mode_config.message_interval
-        # ... and other relevant args from TestMode dataclass ...
-        if hasattr(selected_mode_config, 'enable_poisson'): args.enable_poisson = selected_mode_config.enable_poisson
-        if hasattr(selected_mode_config, 'enable_throttling'): args.enable_throttling = selected_mode_config.enable_throttling
-        # ... etc.
-        main_logger.info(f"Running with test mode: {selected_mode_config.name} - {selected_mode_config.description}")
-        # Validate system requirements for the selected mode
-        if not validate_system_requirements(selected_mode_config):
-             sys.exit(1) # validate_system_requirements should log the error
+        except Exception as e:
+            main_logger.error(f"❌ Error loading profile: {e}")
+            sys.exit(1)
+    
+    # LEGACY: Fall back to old test-mode if no profile specified
+    if not args.profile:
+        if args.test_mode:
+            main_logger.warning("⚠️  --test-mode is deprecated. Use --profile instead.")
+            selected_mode_config = get_mode_config(args.test_mode)
+            if not selected_mode_config:
+                main_logger.error(f"Test mode '{args.test_mode}' not found. Use --list-modes to see available modes.")
+                sys.exit(1)
+            
+            # Apply mode config to args (preserving CLI overrides)
+            if args.devices is None:
+                args.devices = selected_mode_config.devices
+            if args.tenants is None:
+                args.tenants = selected_mode_config.tenants
+            if args.protocols is None or args.protocols == []:
+                args.protocols = selected_mode_config.protocols
+            if args.message_interval is None:
+                args.message_interval = selected_mode_config.message_interval
+            if args.interval is None:
+                args.interval = args.message_interval
+            
+            if hasattr(selected_mode_config, 'enable_poisson') and not args.enable_poisson: 
+                args.enable_poisson = selected_mode_config.enable_poisson
+            if hasattr(selected_mode_config, 'enable_throttling') and not args.enable_throttling: 
+                args.enable_throttling = selected_mode_config.enable_throttling
+            
+            main_logger.info(f"Running with test mode: {selected_mode_config.name} - {selected_mode_config.description}")
+            if not validate_system_requirements(selected_mode_config):
+                 sys.exit(1)
+        else:
+            # No profile or test-mode specified - use 'smoke' profile as default
+            main_logger.info("ℹ️  No profile specified, using default 'smoke' profile")
+            try:
+                from config.config_loader import ConfigLoader
+                config_loader = ConfigLoader(args.config_file)
+                
+                # Load smoke profile as default
+                profile_config = config_loader.get_full_config('smoke')
+                test_settings = profile_config['test']
+                
+                args.devices = test_settings.get('devices', 1)
+                args.tenants = test_settings.get('tenants', 1)
+                args.protocols = test_settings.get('protocols', ['mqtt'])
+                args.message_interval = test_settings.get('message_interval', 10.0)
+                if args.interval is None:
+                    args.interval = args.message_interval
+                if args.duration is None:
+                    args.duration = test_settings.get('duration', 60)
+                
+                main_logger.info(f"✅ Using default 'smoke' profile")
+            except:
+                # Fallback to hardcoded defaults if config file not available
+                main_logger.warning("⚠️  Could not load config file, using hardcoded defaults")
+                if args.devices is None:
+                    args.devices = 1
+                if args.tenants is None:
+                    args.tenants = 1
+                if args.protocols is None or args.protocols == []:
+                    args.protocols = ['mqtt']
+                if args.message_interval is None:
+                    args.message_interval = 10.0
+                if args.interval is None:
+                    args.interval = args.message_interval
+                if args.duration is None:
+                    args.duration = 60
 
     print_startup_info(args, config, selected_mode_config) # Pass selected_mode_config
 

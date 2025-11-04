@@ -6,73 +6,86 @@ services:
     command: python /app/docker-services/registrar_service.py
     environment:
       - SERVICE_NAME=registrar
-      - TENANT_COUNT=${TENANT_COUNT:-5}
-      - DEVICE_COUNT=${DEVICE_COUNT:-10}
-    env_file:
-      - .env
-      - hono.env
+      # NEW: Use profile-based config
+      - PROFILE=${PROFILE:-smoke}
+      - CONFIG_FILE=/app/config/hono.yaml
+      # Optional overrides
+      - TENANTS=${TENANTS}
+      - DEVICES=${DEVICES}
+      - USE_CACHE=${USE_CACHE:-true}
+      - CLEAR_CACHE=${CLEAR_CACHE:-false}
     volumes:
       - shared_data:/app/shared
+      - cache_data:/app/cache           # NEW: Persistent cache
+      - ./config:/app/config:ro          # NEW: Mount config files
+      - ./truststore.pem:/app/truststore.pem:ro
     networks:
       - hono-test
     depends_on:
       - setup-shared-volume
-    restart: unless-stopped
+    restart: on-failure
 
   validator:
     build: .
     command: python /app/docker-services/validator_service.py
     environment:
       - SERVICE_NAME=validator
-    env_file:
-      - .env
-      - hono.env
+      - PROFILE=${PROFILE:-smoke}
     volumes:
       - shared_data:/app/shared
+      - ./config:/app/config:ro          # NEW: Mount config files
+      - ./truststore.pem:/app/truststore.pem:ro
     networks:
       - hono-test
     depends_on:
-      - registrar
-    restart: unless-stopped
+      registrar:
+        condition: service_completed_successfully  # Wait for registrar to finish
+    restart: on-failure
 
   loadgen:
     build: .
     command: python /app/docker-services/loadgen_service.py
     environment:
       - SERVICE_NAME=loadgen
-      - PROTOCOLS=${PROTOCOLS:-mqtt}
-      - MESSAGE_TYPE=${MESSAGE_TYPE:-telemetry}
-      - MESSAGE_INTERVAL=${MESSAGE_INTERVAL:-10}
-    env_file:
-      - .env
-      - hono.env
+      # NEW: Profile-based config
+      - PROFILE=${PROFILE:-smoke}
+      # Optional overrides
+      - PROTOCOLS=${PROTOCOLS}
+      - MESSAGE_INTERVAL=${MESSAGE_INTERVAL}
+      - DURATION=${DURATION}
     volumes:
       - shared_data:/app/shared
+      - ./reports:/app/reports           # NEW: Reports output to host
+      - ./logs:/app/logs                 # NEW: Logs output to host
+      - ./config:/app/config:ro          # NEW: Mount config files
+      - ./truststore.pem:/app/truststore.pem:ro
     networks:
       - hono-test
     depends_on:
-      - validator
+      validator:
+        condition: service_completed_successfully  # Wait for validator to finish
     restart: unless-stopped
-    deploy:
-      replicas: ${LOADGEN_REPLICAS:-1}
 
   # Helper service to create shared volume with proper permissions
   setup-shared-volume:
     image: busybox
     command: |
       sh -c "
-        mkdir -p /app/shared &&
-        chmod 777 /app/shared &&
+        mkdir -p /app/shared /app/cache &&
+        chmod 777 /app/shared /app/cache &&
         touch /app/shared/tenants.json /app/shared/devices.json /app/shared/status.json &&
         chmod 666 /app/shared/*.json
       "
     volumes:
       - shared_data:/app/shared
+      - cache_data:/app/cache            # NEW: Cache volume
     networks:
       - hono-test
 
 volumes:
   shared_data:
+    driver: local
+  cache_data:                            # NEW: Persistent cache volume
     driver: local
 
 networks:

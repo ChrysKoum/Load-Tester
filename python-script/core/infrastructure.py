@@ -184,7 +184,16 @@ class InfrastructureManager:
             return False
     
     async def setup_infrastructure(self, num_tenants: int = 5, num_devices: int = 10) -> tuple[List[str], List[Device], bool]:
-        """Set up tenants and devices for load testing."""
+        """
+        Set up tenants and devices for load testing.
+        
+        Args:
+            num_tenants: Number of tenants to create
+            num_devices: Total number of devices to create (distributed across all tenants)
+            
+        Returns:
+            tuple: (list of tenant IDs, list of Device objects, success boolean)
+        """
         self.logger.info(f"Setting up {num_tenants} tenants with {num_devices} devices total...")
         
         # Try to load from cache first
@@ -321,7 +330,17 @@ class InfrastructureManager:
     
     async def setup_infrastructure_with_throttling(self, num_tenants: int = 5, num_devices: int = 10, 
                                                   reporting_manager: Optional['ReportingManager'] = None) -> bool:
-        """Set up infrastructure with advanced registration throttling."""
+        """
+        Set up infrastructure with advanced registration throttling.
+        
+        Args:
+            num_tenants: Number of tenants to create
+            num_devices: Total number of devices to create (distributed across all tenants)
+            reporting_manager: Optional reporting manager for metrics
+            
+        Returns:
+            bool: True if setup successful, False otherwise
+        """
         self.logger.info(f"Setting up {num_tenants} tenants with {num_devices} devices total (throttled)...")
         
         # Configure SSL context properly based on environment
