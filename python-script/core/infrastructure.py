@@ -227,10 +227,19 @@ class InfrastructureManager:
                         ssl_context.verify_mode = ssl.CERT_NONE
                 
                 connector = aiohttp.TCPConnector(ssl=ssl_context, limit=100)
-                timeout = aiohttp.ClientTimeout(total=30)
+                timeout = aiohttp.ClientTimeout(total=45) 
                 
                 async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
-                    validation_tasks = [self.validate_device_http(session, device) for device in cached_devices]
+                    # Throttled validation here too
+                    sem = asyncio.Semaphore(10)
+                    
+                    async def validate_with_sem(device):
+                        async with sem:
+                            res = await self.validate_device_http(session, device)
+                            await asyncio.sleep(0.05)
+                            return res
+
+                    validation_tasks = [validate_with_sem(device) for device in cached_devices]
                     validation_results = await asyncio.gather(*validation_tasks, return_exceptions=True)
                     
                     successful_validations = sum(1 for r in validation_results if r is True)
@@ -342,6 +351,68 @@ class InfrastructureManager:
             bool: True if setup successful, False otherwise
         """
         self.logger.info(f"Setting up {num_tenants} tenants with {num_devices} devices total (throttled)...")
+        
+        # Try to load from cache first (Added missing logic)
+        if self.use_cache and self.device_cache:
+            self.logger.info(f"🔍 Checking cache for {self.config.registry_ip}:{self.config.registry_port}...")
+            cached_devices = self.device_cache.get_devices(
+                self.config.registry_ip, 
+                self.config.registry_port, 
+                num_devices
+            )
+            
+            if cached_devices:
+                self.logger.info(f"♻️  Using {len(cached_devices)} cached devices from previous run")
+                # Extract unique tenant IDs from cached devices
+                cached_tenants = list(set([d.tenant_id for d in cached_devices]))
+                self.tenants = cached_tenants
+                self.devices = cached_devices
+                
+                # Validate cached devices still work
+                self.logger.info("Validating cached devices...")
+                
+                ssl_context = None
+                if self.config.use_tls:
+                    if self.config.ca_file_path and os.path.exists(self.config.ca_file_path):
+                        ssl_context = ssl.create_default_context(cafile=self.config.ca_file_path)
+                    else:
+                        ssl_context = ssl.create_default_context()
+                    
+                    if not self.config.verify_ssl:
+                        ssl_context.check_hostname = False
+                        ssl_context.verify_mode = ssl.CERT_NONE
+                
+                connector = aiohttp.TCPConnector(ssl=ssl_context, limit=100)
+                timeout = aiohttp.ClientTimeout(total=80) # Increased timeout
+                
+                async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+                    # Throttled validation to avoid 503 errors (max 10 concurrent)
+                    sem = asyncio.Semaphore(10)
+                    
+                    async def validate_with_sem(device):
+                        async with sem:
+                            res = await self.validate_device_http(session, device)
+                            await asyncio.sleep(0.05) # Power nap to be nice to adapter
+                            return res
+
+                    validation_tasks = [validate_with_sem(device) for device in cached_devices]
+                    validation_results = await asyncio.gather(*validation_tasks, return_exceptions=True)
+                    
+                    successful_validations = sum(1 for r in validation_results if r is True)
+                    self.logger.info(f"Validation complete: {successful_validations}/{len(cached_devices)} cached devices validated")
+                    
+                    if successful_validations >= num_devices * 0.8:  # 80% success threshold
+                        self.logger.info("✅ Cached devices validated successfully! Using cached infrastructure.")
+                        # Init stats with cached values
+                        self.stats['tenants_created'] = len(cached_tenants)
+                        self.stats['devices_created'] = len(cached_devices)
+                        self.stats['validation_success'] = successful_validations
+                        self.stats['validation_failed'] = len(cached_devices) - successful_validations
+                        return True
+                    else:
+                        self.logger.warning(f"⚠️  Only {successful_validations}/{len(cached_devices)} cached devices validated. Creating fresh infrastructure.")
+                        # Clear invalid cache
+                        self.device_cache.clear_cache(self.config.registry_ip, self.config.registry_port)
         
         # Configure SSL context properly based on environment
         ssl_context = None
@@ -481,6 +552,16 @@ class InfrastructureManager:
                         self.stats['validation_failed'] += 1 # Update internal stats
 
             self.logger.info(f"Validation complete (throttled setup): {successful_validations}/{len(self.devices)} devices validated")
+
+            # Save to cache if devices validated successfully (Fix for throttled setup)
+            if self.use_cache and self.device_cache and successful_validations > 0:
+                self.logger.info("💾 Saving devices to cache for future use (throttled setup)...")
+                self.device_cache.save_cache(
+                    self.config.registry_ip,
+                    self.config.registry_port,
+                    self.tenants,
+                    self.devices
+                )
 
             # Pass validation stats to ReportingManager if it's provided
             if reporting_manager and hasattr(reporting_manager, 'update_validation_stats'):

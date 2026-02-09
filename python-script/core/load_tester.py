@@ -19,7 +19,7 @@ from core.load_controller import LoadController # Import LoadController
 class HonoLoadTester:
     """Main class for Hono load testing."""
 
-    def __init__(self, config: HonoConfig, devices: List[Device], tenants: List[str], reporting_manager: Optional[ReportingManager] = None, use_cache: bool = True):
+    def __init__(self, config: HonoConfig, devices: List[Device], tenants: List[str], reporting_manager: Optional[ReportingManager] = None, use_cache: bool = True, message_interval: float = 1.0, test_config: Optional[dict] = None):
         self.config = config
         self.devices = devices
         self.tenants = tenants
@@ -38,7 +38,7 @@ class HonoLoadTester:
         self.infrastructure_manager = InfrastructureManager(config, self.reporting_manager, use_cache=use_cache)
 
         # Initialize LoadController
-        self.load_controller = LoadController(config.message_interval, config.config_data)
+        self.load_controller = LoadController(message_interval, test_config or {})
 
         self.protocol_workers = ProtocolWorkers(
             config,

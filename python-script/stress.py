@@ -17,7 +17,7 @@ import numpy as np
 import logging.handlers # For more advanced handlers if needed in future
 from pathlib import Path
 import datetime
-from typing import Optional
+from typing import Optional, Dict, Any
 
 from config.hono_config import HonoConfig, load_config_from_env as actual_hono_config_loader
 from config.test_modes import (
@@ -36,6 +36,9 @@ current_run_output_path: Optional[Path] = None # Optional is now defined
 
 # Global shutdown event
 _shutdown_event = threading.Event() # Define _shutdown_event globally
+
+# Global test configuration data (populated from profile)
+test_config_data: Dict[str, Any] = {}
 
 def setup_logging(args, base_output_dir: Path): # Modified signature
     """Configures console and file logging into the specified base_output_dir."""
@@ -218,6 +221,8 @@ async def run_test():
     # Set duration limits
     if args.max_duration:
         _max_duration_seconds = args.max_duration * 3600  # Convert hours to seconds
+    elif args.duration:
+        _max_duration_seconds = float(args.duration)
     elif mode and hasattr(mode, 'target_duration_hours') and mode.target_duration_hours > 0 and args.auto_stop:
         _max_duration_seconds = mode.target_duration_hours * 3600
 
@@ -385,11 +390,14 @@ async def run_test():
                 return 1
 
         # NOW create the LoadTester with the actual devices and tenants
+        # NOW create the LoadTester with the actual devices and tenants
         tester = HonoLoadTester(
             config=config,
             devices=devices_list,
             tenants=tenants_list,
-            reporting_manager=reporting_manager
+            reporting_manager=reporting_manager,
+            message_interval=args.interval,
+            test_config=test_config_data
         )
         
         # Configure SLA thresholds after tester is initialized
@@ -430,6 +438,11 @@ async def run_test():
         print(f"   Base interval: {message_interval}s between messages")
         print(f"   Real-time monitoring: {'Enabled' if args.real_time_monitoring else 'Disabled'}")
         print(f"   Performance alerts: {'Enabled' if args.performance_alerts else 'Disabled'}")
+        
+        if _max_duration_seconds:
+            print(f"   Planned Duration: {_max_duration_seconds}s ({_max_duration_seconds/3600:.2f}h)")
+        else:
+            print(f"   Planned Duration: Infinite (Control-C to stop)")
         
         if mode:
             print(f"   Expected duration: {mode.duration_hint}")
@@ -610,15 +623,11 @@ async def start_enhanced_load_test(tester, protocols, base_interval, args):
     
     print(f"🚀 Started {len(tasks)} enhanced worker tasks")
     
-    try:
-        await asyncio.gather(*tasks, return_exceptions=True)
-    except Exception as e:
-        print(f"❌ Enhanced load test error: {e}")
-    finally:
-        # Stop the test and set end time
-        tester.reporting_manager.set_running(False)
-        tester.protocol_workers.set_running(False)
-        print("✅ Enhanced load test completed")
+    print(f"🚀 Started {len(tasks)} enhanced worker tasks")
+    
+    # Do NOT await tasks here, as they run indefinitely until signaled to stop.
+    # Return them so the main loop can continue monitoring.
+    return tasks
 
 
 async def enhanced_mqtt_worker_with_poisson(device, base_interval, reporting_manager, protocol_workers):
@@ -860,7 +869,7 @@ def print_advanced_periodic_stats(reporting_manager, args):
 
 def main():
     """Main entry point for the Hono Load Test Suite."""
-    global args, config, reporting_manager, main_logger, current_run_output_path, _shutdown_event
+    global args, config, reporting_manager, main_logger, current_run_output_path, _shutdown_event, test_config_data
 
     # Argument parsing
     parser = argparse.ArgumentParser(description="Hono Load Test Suite - Comprehensive Test Modes with Advanced Features")
@@ -1019,6 +1028,7 @@ def main():
             
             # Apply profile settings to args
             test_settings = profile_config['test']
+            test_config_data = test_settings # Store for HonoLoadTester
             args.devices = test_settings.get('devices', 1)
             args.tenants = test_settings.get('tenants', 1)
             args.protocols = test_settings.get('protocols', ['mqtt'])
