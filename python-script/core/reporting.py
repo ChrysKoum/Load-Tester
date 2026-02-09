@@ -13,6 +13,20 @@ from pathlib import Path
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Any, TYPE_CHECKING
 
+# Resource monitoring
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
+
+# Seaborn for heatmaps (optional)
+try:
+    import seaborn as sns
+    SEABORN_AVAILABLE = True
+except ImportError:
+    SEABORN_AVAILABLE = False
+
 # Import HonoConfig only for type checking to avoid circular imports at runtime
 if TYPE_CHECKING:
     from config.hono_config import HonoConfig # Import for type hinting
@@ -83,7 +97,27 @@ class ReportingManager:
             'avg_latency': [],
             'registration_rate': [],        # Track registration rate over time
             'actual_msg_intervals': [],     # Track actual message intervals
-            'adapter_load': []              # Track adapter load over time
+            'adapter_load': [],             # Track adapter load over time
+            # NEW: Additional graph data
+            'success_rate': [],             # Success rate over time (%)
+            'cumulative_messages': [],      # Running total for 2M goal tracking
+            'memory_usage_mb': [],          # Client memory usage
+            'cpu_usage_percent': [],        # Client CPU usage
+            'active_connections': [],       # Connection pool status
+            'latency_p50': [],              # For latency percentile bands
+        }
+        
+        # NEW: Per-tenant throughput tracking
+        self.per_tenant_stats: Dict[str, Dict[str, Any]] = {}
+        
+        # NEW: Error type tracking
+        self.error_types: Dict[str, int] = {
+            'connection_timeout': 0,
+            'authentication_failed': 0,
+            'server_error': 0,
+            'rate_limited': 0,
+            'network_error': 0,
+            'unknown': 0
         }
         
         # Enhanced performance metrics
@@ -198,6 +232,14 @@ class ReportingManager:
         
         report_content = self._generate_report_content(tenants, devices, test_duration)
         
+        # NEW: Add Capacity Conclusion & SLO Report
+        try:
+            slos = self.calculate_slos()
+            capacity_section = self.generate_capacity_conclusion_section(slos)
+            report_content += "\n" + capacity_section
+        except Exception as e:
+            self.logger.error(f"Failed to generate capacity conclusion: {e}")
+        
         try:
             with open(report_file, 'w', encoding='utf-8') as f: # Ensure UTF-8 for report file
                 f.write(report_content)
@@ -222,7 +264,19 @@ class ReportingManager:
             plot_functions = [
                 self._plot_throughput_over_time,
                 self._plot_latency_over_time,
-                self._plot_latency_distribution
+                self._plot_latency_distribution,
+                # NEW: High Priority Graphs
+                self._plot_success_rate_over_time,
+                self._plot_cumulative_messages,
+                self._plot_error_type_breakdown,
+                # NEW: Medium Priority Graphs
+                self._plot_per_tenant_throughput,
+                self._plot_memory_cpu_usage,
+                self._plot_connection_pool_status,
+                # NEW: Low Priority Graphs
+                self._plot_heatmap_hour_day,
+                self._plot_moving_average_throughput,
+                self._plot_latency_percentile_bands,
             ]
             if self.advanced_metrics.registration_delays: # Check if data exists
                 plot_functions.append(self._plot_registration_delays)
@@ -435,6 +489,78 @@ Report generated at: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
         
         return calculated_percentiles
 
+    def calculate_slos(self) -> Dict[str, Any]:
+        """Calculate SLO compliance metrics."""
+        total_requests = self.stats['messages_sent'] + self.stats['messages_failed']
+        if total_requests == 0:
+            return {}
+
+        success_rate = (self.stats['messages_sent'] / total_requests) * 100
+        
+        # Calculate P95 and P99 from collected latency data
+        all_response_times = [rt for rt in self.performance_metrics['response_times'] if isinstance(rt, (int, float))]
+        if all_response_times:
+            p95 = np.percentile(all_response_times, 95)
+            p99 = np.percentile(all_response_times, 99)
+            avg = np.mean(all_response_times)
+        else:
+            p95 = p99 = avg = 0
+
+        # Define targets (can be made configurable in future)
+        target_success = 99.9
+        target_p95 = 200  # ms
+        target_p99 = 500  # ms
+
+        return {
+            'success_rate': success_rate,
+            'p95_latency': p95,
+            'p99_latency': p99,
+            'avg_latency': avg,
+            'success_passed': success_rate >= target_success,
+            'p95_passed': p95 <= target_p95,
+            'p99_passed': p99 <= target_p99,
+            'targets': {
+                'success': target_success,
+                'p95': target_p95,
+                'p99': target_p99
+            }
+        }
+
+    def _calculate_sustained_throughput(self) -> float:
+        """Helper to calculate overall throughput."""
+        if self.time_series_data['timestamps']:
+             start = self.time_series_data['timestamps'][0]
+             end = self.time_series_data['timestamps'][-1]
+             # Handle datetime objects by converting to timestamp if necessary, assuming datetime objects:
+             duration = (end - start).total_seconds()
+             if duration > 0:
+                 return self.stats['messages_sent'] / duration
+        return 0.0
+
+    def generate_capacity_conclusion_section(self, slos: Dict[str, Any]) -> str:
+        """Generate a CV-worthy capacity conclusion summary."""
+        if not slos:
+            return "No data available for capacity conclusion."
+
+        status_icon = "✅" if (slos['success_passed'] and slos['p95_passed']) else "⚠️"
+        
+        conclusion = [
+            "\nCAPACITY CONCLUSION & SLO Report",
+            "========================================",
+            f"Overall Status: {status_icon} {'PASS' if (slos['success_passed'] and slos['p95_passed']) else 'WARN'}",
+            "",
+            "SLO Performance:",
+            f"  - Success Rate: {slos['success_rate']:.4f}% (Target: >{slos['targets']['success']}%) [{'PASS' if slos['success_passed'] else 'FAIL'}]",
+            f"  - P95 Latency:  {slos['p95_latency']:.2f}ms (Target: <{slos['targets']['p95']}ms) [{'PASS' if slos['p95_passed'] else 'FAIL'}]",
+            f"  - P99 Latency:  {slos['p99_latency']:.2f}ms (Target: <{slos['targets']['p99']}ms) [{'PASS' if slos['p99_passed'] else 'FAIL'}]",
+            "",
+            "Capacity Statement:",
+            f"  Validates sustained throughput of {self._calculate_sustained_throughput():.2f} msg/sec",
+            f"  with {slos['success_rate']:.2f}% availability over test duration.",
+            "========================================\n"
+        ]
+        return "\n".join(conclusion)
+
     def get_real_time_latency_stats(self) -> Optional[Dict]:
         """Get real-time latency statistics from the latency_history."""
         if not self.performance_metrics['latency_history']:
@@ -547,6 +673,7 @@ Report generated at: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
                     self.time_series_data['avg_latency'].append(latency_stats_dict.get('current_avg', 0))
                     self.time_series_data['latency_95th'].append(latency_stats_dict.get('percentiles', {}).get('p95', 0))
                     self.time_series_data['latency_99th'].append(latency_stats_dict.get('percentiles', {}).get('p99', 0))
+                    self.time_series_data['latency_p50'].append(latency_stats_dict.get('percentiles', {}).get('p50', 0))
                     latency_info_str = (f", Avg Lat: {latency_stats_dict.get('current_avg', 0):.1f}ms, "
                                         f"P95: {latency_stats_dict.get('percentiles', {}).get('p95', 0):.1f}ms, "
                                         f"P99: {latency_stats_dict.get('percentiles', {}).get('p99', 0):.1f}ms")
@@ -554,6 +681,32 @@ Report generated at: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
                     self.time_series_data['avg_latency'].append(0)
                     self.time_series_data['latency_95th'].append(0)
                     self.time_series_data['latency_99th'].append(0)
+                    self.time_series_data['latency_p50'].append(0)
+                
+                # NEW: Collect additional metrics for new graphs
+                # Success rate over time
+                total_interval = interval_sent + interval_failed
+                success_rate = (interval_sent / total_interval * 100) if total_interval > 0 else 100.0
+                self.time_series_data['success_rate'].append(success_rate)
+                
+                # Cumulative messages (for 2M goal tracking)
+                cumulative = current_sent_total + current_failed_total
+                self.time_series_data['cumulative_messages'].append(cumulative)
+                
+                # Memory and CPU usage (if psutil available)
+                if PSUTIL_AVAILABLE:
+                    try:
+                        process = psutil.Process()
+                        memory_mb = process.memory_info().rss / (1024 * 1024)
+                        cpu_percent = process.cpu_percent(interval=None)
+                        self.time_series_data['memory_usage_mb'].append(memory_mb)
+                        self.time_series_data['cpu_usage_percent'].append(cpu_percent)
+                    except Exception:
+                        self.time_series_data['memory_usage_mb'].append(0)
+                        self.time_series_data['cpu_usage_percent'].append(0)
+                else:
+                    self.time_series_data['memory_usage_mb'].append(0)
+                    self.time_series_data['cpu_usage_percent'].append(0)
                 
                 self.logger.info(
                     f"Stats - Sent: {current_sent_total} ({sent_rate:.1f}/s), "
@@ -956,5 +1109,425 @@ Max Interval: {max(intervals):.2f}s"""
             return fig_path # Return Path object for consistency
         except Exception as e:
             self.logger.error(f"Failed to plot Poisson interval graph: {e}", exc_info=True)
+            if plt.gcf().get_axes(): plt.close()
+            return None
+    # ============================================================
+    # NEW GRAPHS - Added for 2M+ scale analysis
+    # ============================================================
+
+    def record_error_type(self, error_type: str):
+        """Record an error with type classification."""
+        error_type_lower = error_type.lower()
+        if 'timeout' in error_type_lower or 'timed out' in error_type_lower:
+            self.error_types['connection_timeout'] += 1
+        elif 'auth' in error_type_lower or '401' in error_type_lower or '403' in error_type_lower:
+            self.error_types['authentication_failed'] += 1
+        elif '429' in error_type_lower or 'rate' in error_type_lower or 'throttl' in error_type_lower:
+            self.error_types['rate_limited'] += 1
+        elif '5' in error_type_lower[:1] or 'server' in error_type_lower:
+            self.error_types['server_error'] += 1
+        elif 'network' in error_type_lower or 'connection' in error_type_lower:
+            self.error_types['network_error'] += 1
+        else:
+            self.error_types['unknown'] += 1
+
+    def record_tenant_message(self, tenant_id: str, success: bool = True):
+        """Record per-tenant message statistics."""
+        if tenant_id not in self.per_tenant_stats:
+            self.per_tenant_stats[tenant_id] = {
+                'messages_sent': 0,
+                'messages_failed': 0,
+                'timestamps': [],
+                'rates': []
+            }
+        if success:
+            self.per_tenant_stats[tenant_id]['messages_sent'] += 1
+        else:
+            self.per_tenant_stats[tenant_id]['messages_failed'] += 1
+
+    def record_connection_count(self, active_connections: int):
+        """Record current active connection count."""
+        self.time_series_data['active_connections'].append(active_connections)
+
+    # --- HIGH PRIORITY GRAPHS ---
+
+    def _plot_success_rate_over_time(self, output_dir: Path, timestamp: str) -> Optional[Path]:
+        """Plot success rate percentage over time to track error spikes."""
+        if not REPORTING_AVAILABLE: return None
+        if not self.time_series_data.get('timestamps') or not self.time_series_data.get('success_rate'):
+            self.logger.warning("No success rate data to plot.")
+            return None
+
+        fig_name = f"success_rate_over_time_{timestamp}.png"
+        fig_path = output_dir / fig_name
+        try:
+            plt.figure(figsize=(12, 6))
+            plt.plot(self.time_series_data['timestamps'], self.time_series_data['success_rate'], 
+                     label='Success Rate (%)', color='green', linewidth=2)
+            plt.axhline(y=99.0, color='orange', linestyle='--', label='99% Target', alpha=0.7)
+            plt.axhline(y=95.0, color='red', linestyle='--', label='95% Warning', alpha=0.7)
+            plt.xlabel("Time")
+            plt.ylabel("Success Rate (%)")
+            plt.title("Success Rate Over Time")
+            plt.ylim(0, 105)
+            plt.legend(loc='lower left')
+            plt.grid(True, linestyle='--', alpha=0.7)
+            plt.xticks(rotation=45)
+            plt.tight_layout()
+            plt.savefig(fig_path)
+            plt.close()
+            self.logger.info(f"Success rate graph saved to {fig_path}")
+            return fig_path
+        except Exception as e:
+            self.logger.error(f"Failed to plot success rate graph: {e}", exc_info=True)
+            if plt.gcf().get_axes(): plt.close()
+            return None
+
+    def _plot_cumulative_messages(self, output_dir: Path, timestamp: str, goal: int = 2000000) -> Optional[Path]:
+        """Plot cumulative message count with 2M goal line."""
+        if not REPORTING_AVAILABLE: return None
+        if not self.time_series_data.get('timestamps') or not self.time_series_data.get('cumulative_messages'):
+            self.logger.warning("No cumulative message data to plot.")
+            return None
+
+        fig_name = f"cumulative_messages_{timestamp}.png"
+        fig_path = output_dir / fig_name
+        try:
+            plt.figure(figsize=(12, 6))
+            plt.fill_between(self.time_series_data['timestamps'], self.time_series_data['cumulative_messages'], 
+                             alpha=0.3, color='blue')
+            plt.plot(self.time_series_data['timestamps'], self.time_series_data['cumulative_messages'], 
+                     label='Messages Sent', color='blue', linewidth=2)
+            plt.axhline(y=goal, color='green', linestyle='--', linewidth=2, label=f'Goal: {goal:,}')
+            plt.axhline(y=goal // 2, color='orange', linestyle=':', linewidth=1.5, label=f'50%: {goal//2:,}')
+            plt.xlabel("Time")
+            plt.ylabel("Total Messages")
+            plt.title("Cumulative Messages - Progress to Goal")
+            plt.legend(loc='upper left')
+            plt.grid(True, linestyle='--', alpha=0.7)
+            plt.xticks(rotation=45)
+            ax = plt.gca()
+            ax.get_yaxis().set_major_formatter(plt.FuncFormatter(lambda x, p: format(int(x), ',')))
+            plt.tight_layout()
+            plt.savefig(fig_path)
+            plt.close()
+            self.logger.info(f"Cumulative messages graph saved to {fig_path}")
+            return fig_path
+        except Exception as e:
+            self.logger.error(f"Failed to plot cumulative messages graph: {e}", exc_info=True)
+            if plt.gcf().get_axes(): plt.close()
+            return None
+
+    def _plot_error_type_breakdown(self, output_dir: Path, timestamp: str) -> Optional[Path]:
+        """Plot pie chart of error types for failure pattern identification."""
+        if not REPORTING_AVAILABLE: return None
+        total_errors = sum(self.error_types.values())
+        if total_errors == 0:
+            self.logger.info("No errors recorded - skipping error breakdown chart.")
+            return None
+
+        fig_name = f"error_type_breakdown_{timestamp}.png"
+        fig_path = output_dir / fig_name
+        try:
+            labels = []
+            sizes = []
+            colors = ['#ff6b6b', '#ffa94d', '#ffd43b', '#69db7c', '#4dabf7', '#9775fa']
+            for i, (error_type, count) in enumerate(self.error_types.items()):
+                if count > 0:
+                    labels.append(f"{error_type.replace('_', ' ').title()}\n({count})")
+                    sizes.append(count)
+
+            plt.figure(figsize=(10, 8))
+            plt.pie(sizes, labels=labels, colors=colors[:len(sizes)], autopct='%1.1f%%', 
+                    startangle=90, explode=[0.05]*len(sizes))
+            plt.title(f"Error Type Breakdown (Total: {total_errors})")
+            plt.tight_layout()
+            plt.savefig(fig_path)
+            plt.close()
+            self.logger.info(f"Error type breakdown graph saved to {fig_path}")
+            return fig_path
+        except Exception as e:
+            self.logger.error(f"Failed to plot error type breakdown: {e}", exc_info=True)
+            if plt.gcf().get_axes(): plt.close()
+            return None
+
+    # --- MEDIUM PRIORITY GRAPHS ---
+
+    def _plot_per_tenant_throughput(self, output_dir: Path, timestamp: str) -> Optional[Path]:
+        """Plot bar chart of throughput per tenant for load distribution analysis."""
+        if not REPORTING_AVAILABLE: return None
+        if not self.per_tenant_stats:
+            self.logger.info("No per-tenant data to plot.")
+            return None
+
+        fig_name = f"per_tenant_throughput_{timestamp}.png"
+        fig_path = output_dir / fig_name
+        try:
+            sorted_tenants = sorted(self.per_tenant_stats.keys())
+            tenant_labels = [t[:10] + '...' if len(t) > 10 else t for t in sorted_tenants]
+            sent_values = [self.per_tenant_stats[t]['messages_sent'] for t in sorted_tenants]
+            failed_values = [self.per_tenant_stats[t]['messages_failed'] for t in sorted_tenants]
+
+            x = np.arange(len(tenant_labels))
+            width = 0.35
+
+            plt.figure(figsize=(12, 6))
+            bars1 = plt.bar(x - width/2, sent_values, width, label='Sent', color='#4dabf7')
+            bars2 = plt.bar(x + width/2, failed_values, width, label='Failed', color='#ff6b6b')
+            
+            plt.xlabel("Tenant")
+            plt.ylabel("Message Count")
+            plt.title("Per-Tenant Throughput")
+            plt.xticks(x, tenant_labels, rotation=45, ha='right')
+            plt.legend()
+            plt.grid(axis='y', linestyle='--', alpha=0.7)
+            plt.tight_layout()
+            plt.savefig(fig_path)
+            plt.close()
+            self.logger.info(f"Per-tenant throughput graph saved to {fig_path}")
+            return fig_path
+        except Exception as e:
+            self.logger.error(f"Failed to plot per-tenant throughput: {e}", exc_info=True)
+            if plt.gcf().get_axes(): plt.close()
+            return None
+
+    def _plot_memory_cpu_usage(self, output_dir: Path, timestamp: str) -> Optional[Path]:
+        """Plot memory and CPU usage over time for resource monitoring."""
+        if not REPORTING_AVAILABLE: return None
+        if not self.time_series_data.get('timestamps'):
+            self.logger.warning("No timestamp data for resource usage plot.")
+            return None
+        
+        has_memory = self.time_series_data.get('memory_usage_mb') and any(self.time_series_data['memory_usage_mb'])
+        has_cpu = self.time_series_data.get('cpu_usage_percent') and any(self.time_series_data['cpu_usage_percent'])
+        
+        if not has_memory and not has_cpu:
+            self.logger.info("No resource usage data to plot (psutil may not be available).")
+            return None
+
+        fig_name = f"resource_usage_{timestamp}.png"
+        fig_path = output_dir / fig_name
+        try:
+            fig, ax1 = plt.subplots(figsize=(12, 6))
+            
+            if has_memory:
+                ax1.plot(self.time_series_data['timestamps'], self.time_series_data['memory_usage_mb'], 
+                         color='#4dabf7', label='Memory (MB)', linewidth=2)
+                ax1.set_ylabel('Memory Usage (MB)', color='#4dabf7')
+                ax1.tick_params(axis='y', labelcolor='#4dabf7')
+            
+            if has_cpu:
+                ax2 = ax1.twinx()
+                ax2.plot(self.time_series_data['timestamps'], self.time_series_data['cpu_usage_percent'], 
+                         color='#ff6b6b', label='CPU (%)', linewidth=2, linestyle='--')
+                ax2.set_ylabel('CPU Usage (%)', color='#ff6b6b')
+                ax2.tick_params(axis='y', labelcolor='#ff6b6b')
+                ax2.set_ylim(0, 100)
+
+            ax1.set_xlabel('Time')
+            ax1.set_title('Client Resource Usage Over Time')
+            ax1.grid(True, linestyle='--', alpha=0.7)
+            plt.xticks(rotation=45)
+            
+            lines1, labels1 = ax1.get_legend_handles_labels()
+            if has_cpu:
+                lines2, labels2 = ax2.get_legend_handles_labels()
+                ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
+            else:
+                ax1.legend(loc='upper left')
+            
+            plt.tight_layout()
+            plt.savefig(fig_path)
+            plt.close()
+            self.logger.info(f"Resource usage graph saved to {fig_path}")
+            return fig_path
+        except Exception as e:
+            self.logger.error(f"Failed to plot resource usage: {e}", exc_info=True)
+            if plt.gcf().get_axes(): plt.close()
+            return None
+
+    def _plot_connection_pool_status(self, output_dir: Path, timestamp: str) -> Optional[Path]:
+        """Plot active connections over time for connection health monitoring."""
+        if not REPORTING_AVAILABLE: return None
+        if not self.time_series_data.get('timestamps') or not self.time_series_data.get('active_connections'):
+            self.logger.info("No connection pool data to plot.")
+            return None
+        
+        if not any(self.time_series_data['active_connections']):
+            self.logger.info("No active connection data recorded.")
+            return None
+
+        fig_name = f"connection_pool_status_{timestamp}.png"
+        fig_path = output_dir / fig_name
+        try:
+            plt.figure(figsize=(12, 6))
+            plt.fill_between(self.time_series_data['timestamps'], self.time_series_data['active_connections'], 
+                             alpha=0.3, color='purple')
+            plt.plot(self.time_series_data['timestamps'], self.time_series_data['active_connections'], 
+                     label='Active Connections', color='purple', linewidth=2)
+            plt.xlabel("Time")
+            plt.ylabel("Active Connections")
+            plt.title("Connection Pool Status Over Time")
+            plt.legend(loc='upper left')
+            plt.grid(True, linestyle='--', alpha=0.7)
+            plt.xticks(rotation=45)
+            plt.tight_layout()
+            plt.savefig(fig_path)
+            plt.close()
+            self.logger.info(f"Connection pool status graph saved to {fig_path}")
+            return fig_path
+        except Exception as e:
+            self.logger.error(f"Failed to plot connection pool status: {e}", exc_info=True)
+            if plt.gcf().get_axes(): plt.close()
+            return None
+
+    # --- LOW PRIORITY GRAPHS ---
+
+    def _plot_heatmap_hour_day(self, output_dir: Path, timestamp: str) -> Optional[Path]:
+        """Plot heatmap of message rate by hour and day for pattern visualization."""
+        if not REPORTING_AVAILABLE: return None
+        if not self.time_series_data.get('timestamps') or not self.time_series_data.get('msg_rate'):
+            self.logger.warning("No data for heatmap plot.")
+            return None
+        
+        if len(self.time_series_data['timestamps']) < 10:
+            self.logger.info("Not enough data points for heatmap (need extended test run).")
+            return None
+
+        fig_name = f"heatmap_hour_day_{timestamp}.png"
+        fig_path = output_dir / fig_name
+        try:
+            df = pd.DataFrame({
+                'timestamp': self.time_series_data['timestamps'],
+                'msg_rate': self.time_series_data['msg_rate']
+            })
+            df['hour'] = df['timestamp'].apply(lambda x: x.hour)
+            df['day'] = df['timestamp'].apply(lambda x: x.strftime('%a'))
+            
+            pivot_data = df.pivot_table(values='msg_rate', index='hour', columns='day', aggfunc='mean')
+            
+            day_order = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+            available_days = [d for d in day_order if d in pivot_data.columns]
+            if available_days:
+                pivot_data = pivot_data[available_days]
+
+            plt.figure(figsize=(12, 8))
+            if SEABORN_AVAILABLE:
+                sns.heatmap(pivot_data, annot=True, fmt='.1f', cmap='YlOrRd', 
+                            cbar_kws={'label': 'Messages/sec'})
+            else:
+                plt.imshow(pivot_data.values, aspect='auto', cmap='YlOrRd')
+                plt.colorbar(label='Messages/sec')
+                plt.xticks(range(len(pivot_data.columns)), pivot_data.columns)
+                plt.yticks(range(len(pivot_data.index)), pivot_data.index)
+            
+            plt.xlabel("Day of Week")
+            plt.ylabel("Hour of Day")
+            plt.title("Message Rate Heatmap (Hour x Day)")
+            plt.tight_layout()
+            plt.savefig(fig_path)
+            plt.close()
+            self.logger.info(f"Heatmap saved to {fig_path}")
+            return fig_path
+        except Exception as e:
+            self.logger.error(f"Failed to plot heatmap: {e}", exc_info=True)
+            if plt.gcf().get_axes(): plt.close()
+            return None
+
+    def _plot_moving_average_throughput(self, output_dir: Path, timestamp: str, window_size: int = 6) -> Optional[Path]:
+        """Plot throughput with moving average for smooth trend visualization."""
+        if not REPORTING_AVAILABLE: return None
+        if not self.time_series_data.get('timestamps') or not self.time_series_data.get('msg_rate'):
+            self.logger.warning("No throughput data for moving average plot.")
+            return None
+        
+        if len(self.time_series_data['msg_rate']) < window_size:
+            self.logger.info(f"Not enough data points for {window_size}-point moving average.")
+            return None
+
+        fig_name = f"moving_avg_throughput_{timestamp}.png"
+        fig_path = output_dir / fig_name
+        try:
+            rates = np.array(self.time_series_data['msg_rate'])
+            moving_avg = np.convolve(rates, np.ones(window_size)/window_size, mode='valid')
+            
+            plt.figure(figsize=(12, 6))
+            plt.plot(self.time_series_data['timestamps'], rates, 
+                     color='lightblue', alpha=0.5, linewidth=1, label='Raw Rate')
+            offset = window_size // 2
+            if len(self.time_series_data['timestamps']) >= len(moving_avg) + offset:
+                timestamps_aligned = self.time_series_data['timestamps'][offset:offset+len(moving_avg)]
+                plt.plot(timestamps_aligned, moving_avg, 
+                         color='blue', linewidth=2, label=f'{window_size}-point Moving Avg')
+            
+            plt.xlabel("Time")
+            plt.ylabel("Rate (msg/sec)")
+            plt.title("Throughput with Moving Average")
+            plt.legend(loc='upper left')
+            plt.grid(True, linestyle='--', alpha=0.7)
+            plt.xticks(rotation=45)
+            plt.tight_layout()
+            plt.savefig(fig_path)
+            plt.close()
+            self.logger.info(f"Moving average throughput graph saved to {fig_path}")
+            return fig_path
+        except Exception as e:
+            self.logger.error(f"Failed to plot moving average throughput: {e}", exc_info=True)
+            if plt.gcf().get_axes(): plt.close()
+            return None
+
+    def _plot_latency_percentile_bands(self, output_dir: Path, timestamp: str) -> Optional[Path]:
+        """Plot P50/P95/P99 latency bands over time for percentile visualization."""
+        if not REPORTING_AVAILABLE: return None
+        if not self.time_series_data.get('timestamps'):
+            self.logger.warning("No timestamp data for latency percentile plot.")
+            return None
+        
+        has_p50 = self.time_series_data.get('latency_p50') and any(self.time_series_data['latency_p50'])
+        has_p95 = self.time_series_data.get('latency_95th') and any(self.time_series_data['latency_95th'])
+        has_p99 = self.time_series_data.get('latency_99th') and any(self.time_series_data['latency_99th'])
+        
+        if not (has_p50 or has_p95 or has_p99):
+            self.logger.info("No latency percentile data to plot.")
+            return None
+
+        fig_name = f"latency_percentile_bands_{timestamp}.png"
+        fig_path = output_dir / fig_name
+        try:
+            plt.figure(figsize=(12, 6))
+            timestamps = self.time_series_data['timestamps']
+            
+            if has_p99 and has_p95:
+                plt.fill_between(timestamps, self.time_series_data['latency_95th'], 
+                                 self.time_series_data['latency_99th'], 
+                                 alpha=0.3, color='red', label='P95-P99 Band')
+            if has_p95 and has_p50:
+                plt.fill_between(timestamps, self.time_series_data['latency_p50'], 
+                                 self.time_series_data['latency_95th'], 
+                                 alpha=0.3, color='orange', label='P50-P95 Band')
+            
+            if has_p50:
+                plt.plot(timestamps, self.time_series_data['latency_p50'], 
+                         color='green', linewidth=2, label='P50')
+            if has_p95:
+                plt.plot(timestamps, self.time_series_data['latency_95th'], 
+                         color='orange', linewidth=2, label='P95')
+            if has_p99:
+                plt.plot(timestamps, self.time_series_data['latency_99th'], 
+                         color='red', linewidth=2, label='P99')
+
+            plt.xlabel("Time")
+            plt.ylabel("Latency (ms)")
+            plt.title("Latency Percentile Bands Over Time")
+            plt.legend(loc='upper left')
+            plt.grid(True, linestyle='--', alpha=0.7)
+            plt.xticks(rotation=45)
+            plt.tight_layout()
+            plt.savefig(fig_path)
+            plt.close()
+            self.logger.info(f"Latency percentile bands graph saved to {fig_path}")
+            return fig_path
+        except Exception as e:
+            self.logger.error(f"Failed to plot latency percentile bands: {e}", exc_info=True)
             if plt.gcf().get_axes(): plt.close()
             return None

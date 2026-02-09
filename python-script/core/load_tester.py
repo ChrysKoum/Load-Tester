@@ -13,6 +13,7 @@ from models.device import Device
 from core.infrastructure import InfrastructureManager
 from core.workers import ProtocolWorkers
 from core.reporting import ReportingManager # Ensure ReportingManager is imported
+from core.load_controller import LoadController # Import LoadController
 
 
 class HonoLoadTester:
@@ -36,9 +37,13 @@ class HonoLoadTester:
         # Assuming InfrastructureManager and ProtocolWorkers constructors are updated to accept ReportingManager
         self.infrastructure_manager = InfrastructureManager(config, self.reporting_manager, use_cache=use_cache)
 
+        # Initialize LoadController
+        self.load_controller = LoadController(config.message_interval, config.config_data)
+
         self.protocol_workers = ProtocolWorkers(
             config,
-            self.reporting_manager # Pass the whole manager
+            self.reporting_manager, # Pass the whole manager
+            self.load_controller    # Pass load controller
         )
         # Remove the basicConfig call if logging is fully handled by stress.py's setup_logging
         # logging.basicConfig(
@@ -74,7 +79,14 @@ class HonoLoadTester:
         self.reporting_manager.initialize_test(protocols)
         self.reporting_manager.set_running(True)
         self.protocol_workers.set_running(True)
+        self.reporting_manager.initialize_test(protocols)
+        self.reporting_manager.set_running(True)
+        self.protocol_workers.set_running(True)
         self.reporting_manager.monitor_stats()
+        
+        # Start load controller scheduler
+        if self.load_controller:
+            self.load_controller.start()
 
         self._worker_threads.clear() 
         
@@ -241,7 +253,12 @@ class HonoLoadTester:
         """Stop the load testing gracefully."""
         self.logger.info("Stopping load test execution...")
         self.reporting_manager.set_running(False)
+        self.reporting_manager.set_running(False)
         self.protocol_workers.set_running(False)
+        
+        # Stop load controller
+        if self.load_controller:
+            self.load_controller.stop()
 
         self.logger.info(f"Waiting for {len(self._worker_threads)} worker threads to join...")
         for thread in self._worker_threads:

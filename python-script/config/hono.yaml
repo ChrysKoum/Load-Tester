@@ -128,6 +128,22 @@ profiles:
     enable_throttling: true
     enable_poisson: true
 
+  # Profile 4: Production 2M Test
+  production_2m:
+    description: "2M+ messages/day continuous test"
+    tenants: 10
+    devices: 200
+    protocols: [http]
+    message_interval: 8.6  # Adjusted for 200 devices (2M/day target)
+    duration: 172800
+    enable_throttling: true
+    enable_poisson: true
+    burst:
+      enabled: true
+      multiplier: 5.0      # 5x load (interval / 5)
+      duration_sec: 60     # Burst lasts 1 minute
+      frequency_sec: 600   # Burst every 10 minutes
+
 # -----------------
 # Advanced Features
 # -----------------

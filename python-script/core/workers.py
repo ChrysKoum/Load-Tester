@@ -18,13 +18,15 @@ from typing import Dict, Optional # Added Optional for type hinting
 from models.device import Device
 from config.hono_config import HonoConfig
 from core.reporting import ReportingManager # Add this if not present
+from core.load_controller import LoadController # Import LoadController
 
 class ProtocolWorkers:
     """Handles worker threads for different protocols."""
 
-    def __init__(self, config: HonoConfig, reporting_manager: ReportingManager): # Modified
+    def __init__(self, config: HonoConfig, reporting_manager: ReportingManager, load_controller: Optional[LoadController] = None): # Modified
         self.config = config
         self.reporting_manager = reporting_manager # Store the manager
+        self.load_controller = load_controller # Store the load controller
         self.logger = logging.getLogger(__name__)
         self._running = True
         # self.stats = stats # Remove, access via self.reporting_manager.stats
@@ -70,8 +72,11 @@ class ProtocolWorkers:
             return None # Or raise
 
 
+
     def mqtt_telemetry_worker(self, device: Device, message_interval: float, protocol_name: str = "telemetry"):
         """Worker function for MQTT telemetry publishing."""
+        # Check if we should use dynamic interval from load controller
+        use_dynamic_interval = self.load_controller is not None
         mqtt_protocol_key = 'mqtt'
         if mqtt_protocol_key not in self.reporting_manager.protocol_stats:
             self.logger.error("MQTT protocol stats not initialized!")
@@ -191,7 +196,13 @@ class ProtocolWorkers:
                     # if not msg_info.is_published(): # Additional check for QoS 1/2 if not waiting
                     #     self.logger.warning(f"MQTT message for {device.device_id} may not have been sent (mid={msg_info.mid})")                if not self._running or not connected_flag: # Re-check running and connection status before sleep
                     break
-                time.sleep(message_interval)
+                # Use dynamic interval if available, otherwise fixed
+                sleep_time = self.load_controller.get_current_interval() if use_dynamic_interval else message_interval
+                
+                # Apply Poisson if enabled (and not in burst mode for simplicity, or combine them)
+                # If burst mode is simple frequency increase, we just reduce the base sleep.
+                
+                time.sleep(sleep_time)
 
         except (socket.timeout, TimeoutError) as e: # Catch generic TimeoutError too
             self.logger.error(f"MQTT worker timeout for {device.device_id}: {e}")
@@ -258,6 +269,8 @@ class ProtocolWorkers:
 
 
     async def http_telemetry_worker(self, device: Device, message_interval: float, message_type: str = "telemetry"):
+        # Check if we should use dynamic interval from load controller
+        use_dynamic_interval = self.load_controller is not None
         http_protocol_key = "http" 
 
         self.logger.debug(f"HTTP worker started for device {device.device_id}")
@@ -355,6 +368,11 @@ class ProtocolWorkers:
 
                 if not self._running: # Re-check running status before sleep
                     break
-                await asyncio.sleep(message_interval)
+                if not self._running: # Re-check running status before sleep
+                    break
+                
+                # Use dynamic interval if available, otherwise fixed
+                sleep_time = self.load_controller.get_current_interval() if use_dynamic_interval else message_interval
+                await asyncio.sleep(sleep_time)
 
 
