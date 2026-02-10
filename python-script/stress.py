@@ -556,6 +556,7 @@ async def run_test():
                     if hasattr(tester.reporting_manager, 'print_advanced_findings'):
                         tester.reporting_manager.print_advanced_findings()
                     
+                    
             except Exception as e_final:
                 main_logger.error(f"⚠️ Failed to generate final report: {e_final}")
 
@@ -911,7 +912,7 @@ def main():
     parser.add_argument("--setup-only", action="store_true", help="Only setup infrastructure, don't run load test.")
     parser.add_argument("--mqtt-insecure", action="store_true", help="Disable MQTT TLS.")
     parser.add_argument("--no-ssl-verify", action="store_true", help="Disable SSL certificate verification.")
-    parser.add_argument("--report-dir", default="./reports", help="Directory for generated reports.")
+    parser.add_argument("--report-dir", default="../reports", help="Directory for generated reports.")
     parser.add_argument("--enhanced-stats", action="store_true", help="Enable enhanced statistics collection.")
     parser.add_argument("--periodic-reports", type=int, default=0, help="Generate periodic reports every N minutes (0 to disable).")
     parser.add_argument("--latency-sla", type=float, default=200.0, help="P95 latency SLA in milliseconds.")
@@ -960,10 +961,9 @@ def main():
 
     # Create a unique timestamped directory for this test run's outputs
     run_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    # Place it in a general "test_results" folder, or directly in the current directory
-    # base_results_folder = Path("./test_results_archive") 
-    # current_run_output_path = base_results_folder / f"run_{run_timestamp}"
-    current_run_output_path = Path(f"run_results_{run_timestamp}") # Creates in the script's directory
+    # Use the configured report directory as base
+    base_results_folder = Path(args.report_dir) 
+    current_run_output_path = base_results_folder / f"run_results_{run_timestamp}"
     try:
         current_run_output_path.mkdir(parents=True, exist_ok=True)
     except OSError as e:
