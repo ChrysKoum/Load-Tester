@@ -132,7 +132,7 @@ profiles:
   production_2m:
     description: "2M+ messages/day continuous test"
     tenants: 10
-    devices: 200
+    devices: 300
     protocols: [mqtt]
     message_interval: 9  # Adjusted for 200 devices (2M/day target)
     duration: 172800

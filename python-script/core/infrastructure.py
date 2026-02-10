@@ -410,9 +410,24 @@ class InfrastructureManager:
                         self.stats['validation_failed'] = len(cached_devices) - successful_validations
                         return True
                     else:
-                        self.logger.warning(f"⚠️  Only {successful_validations}/{len(cached_devices)} cached devices validated. Creating fresh infrastructure.")
-                        # Clear invalid cache
-                        self.device_cache.clear_cache(self.config.registry_ip, self.config.registry_port)
+                        # Partial cache hit logic: Keep valid ones
+                        valid_devices = [d for d, r in zip(cached_devices, validation_results) if r is True]
+                        
+                        if valid_devices:
+                             self.logger.info(f"⚠️  Partial cache hit ({len(valid_devices)}/{len(cached_devices)} valid). Extending infrastructure...")
+                             self.devices = valid_devices
+                             self.tenants = list(set(d.tenant_id for d in valid_devices))
+                             
+                             # Update stats for partial
+                             self.stats['tenants_created'] = len(self.tenants)
+                             self.stats['devices_created'] = len(self.devices)
+                             self.stats['validation_success'] = successful_validations
+                             self.stats['validation_failed'] = len(cached_devices) - successful_validations
+                        else:
+                             self.logger.warning(f"⚠️  No valid cached devices found. Creating fresh infrastructure.")
+                             self.device_cache.clear_cache(self.config.registry_ip, self.config.registry_port)
+                             self.devices = []
+                             self.tenants = []
         
         # Configure SSL context properly based on environment
         ssl_context = None
@@ -432,16 +447,22 @@ class InfrastructureManager:
         connector = aiohttp.TCPConnector(ssl=ssl_context, limit=self.config.http_connection_limit if hasattr(self.config, 'http_connection_limit') else 100)
         timeout = aiohttp.ClientTimeout(total=self.config.http_timeout)
         
-        created_tenants_list: List[str] = []
+        created_tenants_list: List[str] = list(self.tenants)
 
         try:
             async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
-                # Create tenants first
-                tenant_tasks = [self.create_tenant(session) for _ in range(num_tenants)]
-                tenant_results = await asyncio.gather(*tenant_tasks, return_exceptions=True)
+                # Create needed tenants
+                needed_tenants = max(0, num_tenants - len(self.tenants))
                 
-                created_tenants_list = [t for t in tenant_results if isinstance(t, str)]
-                self.tenants = created_tenants_list # Store created tenant IDs
+                if needed_tenants > 0:
+                    self.logger.info(f"Creating {needed_tenants} additional tenants...")
+                    tenant_tasks = [self.create_tenant(session) for _ in range(needed_tenants)]
+                    tenant_results = await asyncio.gather(*tenant_tasks, return_exceptions=True)
+                    
+                    new_tenants = [t for t in tenant_results if isinstance(t, str)]
+                    created_tenants_list.extend(new_tenants)
+                
+                self.tenants = created_tenants_list # Update full list
 
                 if not self.tenants:
                     self.logger.error("No tenants created successfully during throttled setup!")
@@ -457,7 +478,7 @@ class InfrastructureManager:
                 devices_per_tenant = num_devices // len(self.tenants)
                 extra_devices = num_devices % len(self.tenants)
                 
-                # Create device distribution plan
+                # Create device distribution plan (for ALL requested devices)
                 device_plan = []
                 global_device_index = 0
                 
@@ -472,10 +493,20 @@ class InfrastructureManager:
                         })
                         global_device_index += 1
                 
-                # Create devices SEQUENTIALLY with throttling
-                successful_devices: List[Device] = []
+                # Filter out devices that already exist and are valid
+                existing_device_ids = set(d.device_id for d in self.devices)
+                needed_device_plan = [p for p in device_plan if p['device_id'] not in existing_device_ids]
                 
-                for i, device_info in enumerate(device_plan):
+                if not needed_device_plan:
+                    self.logger.info("✅ All requested devices already exist and are valid.")
+                    return True
+
+                self.logger.info(f"🔨 Creating {len(needed_device_plan)} new devices to reach target of {num_devices}...")
+                
+                # Create devices SEQUENTIALLY with throttling
+                successful_devices: List[Device] = list(self.devices)
+                
+                for i, device_info in enumerate(needed_device_plan):
                     # Calculate throttling delay
                     delay = 0.0
                     if reporting_manager and hasattr(reporting_manager, 'calculate_registration_delay'):
