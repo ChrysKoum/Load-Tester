@@ -131,7 +131,7 @@ profiles:
   # Profile 4: Production High-Volume Test
   production_2m:
     description: "High-volume continuous load test (~9.6M msgs/day with 1000 devices)"
-    tenants: 50
+    tenants: 10
     devices: 500
     protocols: [mqtt]
     message_interval: 9  # 1000 devices @ 9s = ~111 msgs/sec = ~9.6M msgs/day
