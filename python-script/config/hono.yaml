@@ -128,14 +128,14 @@ profiles:
     enable_throttling: true
     enable_poisson: true
 
-  # Profile 4: Production 2M Test
+  # Profile 4: Production High-Volume Test
   production_2m:
-    description: "2M+ messages/day continuous test"
-    tenants: 10
-    devices: 300
+    description: "High-volume continuous load test (~9.6M msgs/day with 1000 devices)"
+    tenants: 50
+    devices: 500
     protocols: [mqtt]
-    message_interval: 9  # Adjusted for 200 devices (2M/day target)
-    duration: 172800
+    message_interval: 9  # 1000 devices @ 9s = ~111 msgs/sec = ~9.6M msgs/day
+    duration: 86400  # 24 hours
     enable_throttling: true
     enable_poisson: true
     
