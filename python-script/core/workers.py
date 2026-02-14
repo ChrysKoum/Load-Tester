@@ -29,13 +29,33 @@ class ProtocolWorkers:
         self.load_controller = load_controller # Store the load controller
         self.logger = logging.getLogger(__name__)
         self._running = True
-        # self.stats = stats # Remove, access via self.reporting_manager.stats
-        # self.protocol_stats = protocol_stats # Remove, access via self.reporting_manager.protocol_stats
+        # Shared SSL context - created once, reused by all MQTT workers
+        self._mqtt_ssl_context: Optional[ssl.SSLContext] = None
+        self._mqtt_ssl_context_initialized = False
 
     def set_running(self, running: bool):
         self._running = running
 
+    def initialize_mqtt_ssl_context(self):
+        """Pre-create the shared MQTT SSL context. Call once before starting workers."""
+        if not self._mqtt_ssl_context_initialized:
+            self._mqtt_ssl_context = self._create_mqtt_ssl_context()
+            self._mqtt_ssl_context_initialized = True
+            self.logger.info("Shared MQTT SSL context initialized (reused by all workers)")
+
     def _get_mqtt_ssl_context(self) -> Optional[ssl.SSLContext]:
+        """Returns the shared SSLContext for MQTT TLS connections."""
+        if not self.config.use_mqtt_tls:
+            return None
+        # Return cached context if available
+        if self._mqtt_ssl_context_initialized:
+            return self._mqtt_ssl_context
+        # Fallback: create on first call (shouldn't happen if initialize_mqtt_ssl_context was called)
+        self._mqtt_ssl_context = self._create_mqtt_ssl_context()
+        self._mqtt_ssl_context_initialized = True
+        return self._mqtt_ssl_context
+
+    def _create_mqtt_ssl_context(self) -> Optional[ssl.SSLContext]:
         """Creates and configures an SSLContext for MQTT TLS connections."""
         if not self.config.use_mqtt_tls:
             return None
@@ -66,12 +86,10 @@ class ProtocolWorkers:
             return context
         except ssl.SSLError as e:
             self.logger.error(f"MQTT SSLContext: Failed to create/load SSL context: {e}. MQTT TLS connection will likely fail.")
-            return None # Or raise an exception to prevent insecure connection attempt
+            return None
         except FileNotFoundError:
             self.logger.error(f"MQTT SSLContext: CA file not found at '{self.config.ca_file_path}'. MQTT TLS connection will likely fail.")
-            return None # Or raise
-
-
+            return None
 
     def mqtt_telemetry_worker(self, device: Device, message_interval: float, protocol_name: str = "telemetry"):
         """Worker function for MQTT telemetry publishing."""
@@ -92,7 +110,7 @@ class ProtocolWorkers:
             mqtt_port = self.config.mqtt_adapter_port
             if ssl_context_obj:
                 client.tls_set_context(ssl_context_obj)
-                self.logger.debug(f"Device {device.device_id}: Attempting MQTT TLS to {mqtt_host}:{mqtt_port}")
+                self.logger.debug(f"Device {device.device_id}: MQTT TLS to {mqtt_host}:{mqtt_port} (shared SSL ctx)")
             else:
                 self.logger.error(f"Device {device.device_id}: MQTT TLS requested but SSL context creation failed. Aborting connection.")
                 self.reporting_manager.record_message_metrics(

@@ -6,6 +6,7 @@ Orchestrates the entire load testing process.
 import asyncio
 import threading
 import logging
+import time
 from typing import List, Optional # Add Optional
 
 from config.hono_config import HonoConfig, load_config_from_env
@@ -137,11 +138,23 @@ class HonoLoadTester:
                     self.logger.warning(f"Protocol {protocol_name} not implemented yet")
                     continue
 
-        # Start all worker threads
-        for thread in self._worker_threads:
+        # Pre-initialize shared SSL context before starting workers
+        if any(p.lower() == 'mqtt' for p in effective_protocols):
+            self.protocol_workers.initialize_mqtt_ssl_context()
+
+        # Start worker threads with staggered connections to avoid 'Too many open files'
+        total_threads = len(self._worker_threads)
+        # Stagger: start in batches of 50 with a short delay between batches
+        batch_size = 50
+        stagger_delay = 0.5  # seconds between batches
+        for i, thread in enumerate(self._worker_threads):
             thread.start()
+            # Add delay between batches to avoid file descriptor exhaustion
+            if (i + 1) % batch_size == 0 and (i + 1) < total_threads:
+                self.logger.info(f"Started {i + 1}/{total_threads} workers, pausing {stagger_delay}s before next batch...")
+                time.sleep(stagger_delay)
         
-        self.logger.info(f"{len(self._worker_threads)} worker threads started.")
+        self.logger.info(f"{total_threads} worker threads started (batch_size={batch_size}).")
 
     async def start_enhanced_load_test(self, protocols: List[str], message_interval: float, args):
         """Start an enhanced load testing with specified protocols and advanced options."""
@@ -239,11 +252,21 @@ class HonoLoadTester:
                     self.logger.warning(f"Protocol {protocol_name} not implemented yet")
                     continue
 
-        # Start all worker threads
-        for thread in self._worker_threads:
+        # Pre-initialize shared SSL context before starting workers
+        if any(p.lower() == 'mqtt' for p in effective_protocols):
+            self.protocol_workers.initialize_mqtt_ssl_context()
+
+        # Start worker threads with staggered connections to avoid 'Too many open files'
+        total_threads = len(self._worker_threads)
+        batch_size = 50
+        stagger_delay = 0.5  # seconds between batches
+        for i, thread in enumerate(self._worker_threads):
             thread.start()
+            if (i + 1) % batch_size == 0 and (i + 1) < total_threads:
+                self.logger.info(f"🚀 Started {i + 1}/{total_threads} workers, pausing {stagger_delay}s before next batch...")
+                time.sleep(stagger_delay)
         
-        self.logger.info(f"🚀 Started {len(self._worker_threads)} enhanced worker tasks")
+        self.logger.info(f"🚀 Started {total_threads} enhanced worker tasks (batch_size={batch_size})")
 
     def generate_report(self, report_dir: str = "./reports"):
         """Generate detailed test report with charts."""
