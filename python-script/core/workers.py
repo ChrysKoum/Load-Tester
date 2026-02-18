@@ -19,11 +19,12 @@ from models.device import Device
 from config.hono_config import HonoConfig
 from core.reporting import ReportingManager # Add this if not present
 from core.load_controller import LoadController # Import LoadController
+from core.smart_logger import SmartLogger, MessageLogger, create_smart_logger # Import smart logger
 
 class ProtocolWorkers:
     """Handles worker threads for different protocols."""
 
-    def __init__(self, config: HonoConfig, reporting_manager: ReportingManager, load_controller: Optional[LoadController] = None): # Modified
+    def __init__(self, config: HonoConfig, reporting_manager: ReportingManager, load_controller: Optional[LoadController] = None, smart_logger: Optional[SmartLogger] = None): # Modified
         self.config = config
         self.reporting_manager = reporting_manager # Store the manager
         self.load_controller = load_controller # Store the load controller
@@ -32,6 +33,9 @@ class ProtocolWorkers:
         # Shared SSL context - created once, reused by all MQTT workers
         self._mqtt_ssl_context: Optional[ssl.SSLContext] = None
         self._mqtt_ssl_context_initialized = False
+        # Smart logger for message send/fail events
+        self.smart_logger = smart_logger
+        self.message_logger = MessageLogger(smart_logger) if smart_logger else None
 
     def set_running(self, running: bool):
         self._running = running
@@ -202,14 +206,22 @@ class ProtocolWorkers:
                         success=True, response_time_ms=response_time_ms, status_code=200
                     )
                     message_count += 1
-                    self.logger.debug(f"MQTT message {message_count} sent by {device.device_id} to topic '{topic}' in {response_time_ms:.0f}ms")
+                    # Use smart logger if available, otherwise regular logger
+                    if self.message_logger:
+                        self.message_logger.log_send_attempt(device.device_id, "mqtt", True, response_time_ms)
+                    else:
+                        self.logger.debug(f"MQTT message {message_count} sent by {device.device_id} to topic '{topic}' in {response_time_ms:.0f}ms")
                 else:
                     error_message = mqtt.error_string(msg_info.rc)
                     self.reporting_manager.record_message_metrics(
                         protocol="mqtt",
                         success=False, response_time_ms=response_time_ms, status_code=500
                     )
-                    self.logger.warning(f"MQTT publish failed for device {device.device_id}: {error_message} (rc: {msg_info.rc})")
+                    # Use smart logger if available, otherwise regular logger
+                    if self.message_logger:
+                        self.message_logger.log_send_attempt(device.device_id, "mqtt", False, response_time_ms, error_message)
+                    else:
+                        self.logger.warning(f"MQTT publish failed for device {device.device_id}: {error_message} (rc: {msg_info.rc})")
                     # Decide if to break loop on publish failure or continue
                     # if not msg_info.is_published(): # Additional check for QoS 1/2 if not waiting
                     #     self.logger.warning(f"MQTT message for {device.device_id} may not have been sent (mid={msg_info.mid})")                if not self._running or not connected_flag: # Re-check running and connection status before sleep
@@ -365,9 +377,17 @@ class ProtocolWorkers:
                         
                         if is_successful:
                             message_count += 1
-                            self.logger.debug(f"HTTP message {message_count} sent by {device.device_id} to {url}, status: {response.status}")
+                            # Use smart logger if available, otherwise regular logger
+                            if self.message_logger:
+                                self.message_logger.log_send_attempt(device.device_id, "http", True, response_time_ms)
+                            else:
+                                self.logger.debug(f"HTTP message {message_count} sent by {device.device_id} to {url}, status: {response.status}")
                         else:
-                            self.logger.warning(f"HTTP post failed for device {device.device_id}: HTTP {response.status}")
+                            # Use smart logger if available, otherwise regular logger
+                            if self.message_logger:
+                                self.message_logger.log_send_attempt(device.device_id, "http", False, response_time_ms, f"HTTP {response.status}")
+                            else:
+                                self.logger.warning(f"HTTP post failed for device {device.device_id}: HTTP {response.status}")
 
                 except Exception as e:
                     self.logger.exception(f"HTTP worker error for device {device.device_id}: {e.__class__.__name__} - {e}")

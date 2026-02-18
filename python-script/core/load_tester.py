@@ -20,7 +20,7 @@ from core.load_controller import LoadController # Import LoadController
 class HonoLoadTester:
     """Main class for Hono load testing."""
 
-    def __init__(self, config: HonoConfig, devices: List[Device], tenants: List[str], reporting_manager: Optional[ReportingManager] = None, use_cache: bool = True, message_interval: float = 1.0, test_config: Optional[dict] = None):
+    def __init__(self, config: HonoConfig, devices: List[Device], tenants: List[str], reporting_manager: Optional[ReportingManager] = None, use_cache: bool = True, message_interval: float = 1.0, test_config: Optional[dict] = None, smart_logger=None):
         self.config = config
         self.devices = devices
         self.tenants = tenants
@@ -44,7 +44,8 @@ class HonoLoadTester:
         self.protocol_workers = ProtocolWorkers(
             config,
             self.reporting_manager, # Pass the whole manager
-            self.load_controller    # Pass load controller
+            self.load_controller,   # Pass load controller
+            smart_logger            # Pass smart logger
         )
         # Remove the basicConfig call if logging is fully handled by stress.py's setup_logging
         # logging.basicConfig(

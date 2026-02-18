@@ -59,24 +59,33 @@ def setup_logging(args, base_output_dir: Path): # Modified signature
     console_handler.encoding = 'utf-8'
     root_logger.addHandler(console_handler)
 
-    # File Handler - logs will go directly into the base_output_dir
-    try:
-        # The base_output_dir is already created by main()
-        # Use a fixed name for the log file within the timestamped run folder
-        log_file_name = "load_test_run.log"
-        log_file_path = base_output_dir / log_file_name
-        
-        file_handler = logging.FileHandler(log_file_path, mode='a', encoding='utf-8')
-        file_handler.setLevel(logging.DEBUG)
-        file_formatter = logging.Formatter('%(asctime)s - %(levelname)-8s - %(name)-30s - %(filename)s:%(lineno)d - %(message)s')
-        file_handler.setFormatter(file_formatter)
-        root_logger.addHandler(file_handler)
-        
-        main_logger.info(f"File logging initialized (UTF-8). Log file: {log_file_path.resolve()} λ ✅")
-    except Exception as e:
-        print(f"Critical error initializing file logging: {e}")
-        logging.basicConfig(level=logging.ERROR) # Basic fallback
-        main_logger.error(f"Failed to initialize file logging: {e}", exc_info=True)
+    # File Handler - based on log mode
+    if args.log_mode != 'none':
+        try:
+            log_file_name = "load_test_run.log"
+            log_file_path = base_output_dir / log_file_name
+            
+            file_handler = logging.FileHandler(log_file_path, mode='a', encoding='utf-8')
+            
+            # Set level based on mode
+            if args.log_mode == 'full':
+                file_handler.setLevel(logging.DEBUG)  # Log everything
+                main_logger.info(f"File logging mode: FULL (all logs including DEBUG)")
+            else:  # smart mode
+                file_handler.setLevel(logging.INFO)  # Only INFO and above (no DEBUG)
+                main_logger.info(f"File logging mode: SMART (intelligent filtering, no DEBUG spam)")
+            
+            file_formatter = logging.Formatter('%(asctime)s - %(levelname)-8s - %(name)-30s - %(filename)s:%(lineno)d - %(message)s')
+            file_handler.setFormatter(file_formatter)
+            root_logger.addHandler(file_handler)
+            
+            main_logger.info(f"File logging initialized (UTF-8). Log file: {log_file_path.resolve()} λ ✅")
+        except Exception as e:
+            print(f"Critical error initializing file logging: {e}")
+            logging.basicConfig(level=logging.ERROR) # Basic fallback
+            main_logger.error(f"Failed to initialize file logging: {e}", exc_info=True)
+    else:
+        main_logger.info("File logging disabled (--log-mode none)")
 
 
 def signal_handler(signum, frame):
@@ -389,7 +398,21 @@ async def run_test():
                 print("❌ Failed to set up infrastructure")
                 return 1
 
-        # NOW create the LoadTester with the actual devices and tenants
+        # Create smart logger if in smart mode
+        smart_logger_instance = None
+        if args.log_mode == 'smart':
+            from core.smart_logger import create_smart_logger
+            # Calculate total duration for smart logger
+            total_duration = _max_duration_seconds if _max_duration_seconds else 3600  # Default 1 hour if not specified
+            smart_logger_instance = create_smart_logger(
+                total_duration_seconds=total_duration,
+                initial_log_count=10,
+                post_failure_log_count=5,
+                periodic_divisor=50,
+                enabled=True
+            )
+            main_logger.info(f"Smart logger initialized for message send/fail events (duration: {total_duration}s)")
+
         # NOW create the LoadTester with the actual devices and tenants
         tester = HonoLoadTester(
             config=config,
@@ -397,7 +420,8 @@ async def run_test():
             tenants=tenants_list,
             reporting_manager=reporting_manager,
             message_interval=args.interval,
-            test_config=test_config_data
+            test_config=test_config_data,
+            smart_logger=smart_logger_instance
         )
         
         # Configure SLA thresholds after tester is initialized
@@ -552,9 +576,33 @@ async def run_test():
                     tester.reporting_manager.generate_report(tenants_list, devices_list, _report_dir)
                     main_logger.info(f"✅ Final test report generated in: {_report_dir}")
                     
+                    # Generate numerical reports
+                    try:
+                        from core.numerical_report import NumericalReportGenerator
+                        test_config = {
+                            'test_mode': args.test_mode or args.mode or 'custom',
+                            'num_tenants': len(tenants_list) if tenants_list else 0,
+                            'num_devices': len(devices_list) if devices_list else 0,
+                            'protocols': args.protocols if args.protocols else ['mqtt']
+                        }
+                        numerical_gen = NumericalReportGenerator(tester.reporting_manager, test_config)
+                        reports = numerical_gen.generate_all_reports(Path(_report_dir))
+                        main_logger.info(f"📊 Generated {len(reports)} numerical reports")
+                    except Exception as e:
+                        main_logger.error(f"Failed to generate numerical reports: {e}")
+                    
                     # Show advanced findings if available
                     if hasattr(tester.reporting_manager, 'print_advanced_findings'):
                         tester.reporting_manager.print_advanced_findings()
+                    
+                    # Show smart logger statistics if available
+                    if smart_logger_instance:
+                        stats = smart_logger_instance.get_stats()
+                        main_logger.info(f"📊 Smart Logger Statistics:")
+                        main_logger.info(f"   Total iterations: {stats['total_iterations']}")
+                        main_logger.info(f"   Success count: {stats['success_count']}")
+                        main_logger.info(f"   Failure count: {stats['failure_count']}")
+                        main_logger.info(f"   Log reduction: {stats['log_reduction_ratio']*100:.1f}%")
                     
                     
             except Exception as e_final:
@@ -884,7 +932,10 @@ def main():
     # Core arguments (now optional - can come from profile)
     parser.add_argument("--env-file", default="../hono.env", help="Path to the .env file for Hono configuration (legacy).")
     parser.add_argument("--log-level", default="INFO", choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'], help="Console logging level.")
-    parser.add_argument("--report", action="store_true", help="Generate a detailed test report.")
+    parser.add_argument("--log-mode", default="smart", choices=['full', 'smart', 'none'], 
+                       help="Log file mode: 'full' (all logs), 'smart' (intelligent filtering, default), 'none' (no file logging).")
+    parser.add_argument("--report", action="store_true", default=True, help="Generate a detailed test report (enabled by default).")
+    parser.add_argument("--no-report", action="store_false", dest="report", help="Disable report generation.")
     parser.add_argument("--duration", type=int, help="Test duration in seconds (overrides profile).")
     parser.add_argument("--message-interval", type=float, help="Base interval between messages in seconds (overrides profile).")
     parser.add_argument("--devices", type=int, help="Number of devices to simulate (overrides profile).")
