@@ -345,13 +345,20 @@ class ReportingManager:
         total_protocol_devices = sum(stats['devices'] for stats in self.protocol_stats.values())
         actual_device_count = len(devices)
         
-        if total_protocol_devices != actual_device_count:
+        if total_protocol_devices != actual_device_count and actual_device_count > 0:
             self.logger.warning(f"Device count mismatch: Protocol stats show {total_protocol_devices} devices, but actual count is {actual_device_count}")
-            # Fix the device counts
+            # Distribute actual device count across protocols proportionally based on messages sent
+            total_messages_all_protocols = sum(s['messages_sent'] for s in self.protocol_stats.values())
             for protocol_name, stats in self.protocol_stats.items():
-                if stats['devices'] > actual_device_count:
-                    self.logger.warning(f"Correcting {protocol_name} device count from {stats['devices']} to {actual_device_count}")
-                    stats['devices'] = actual_device_count
+                if total_messages_all_protocols > 0:
+                    # Proportional distribution based on messages sent
+                    proportion = stats['messages_sent'] / total_messages_all_protocols
+                    corrected_count = round(actual_device_count * proportion)
+                else:
+                    # Even distribution if no messages sent yet
+                    corrected_count = actual_device_count // len(self.protocol_stats) if self.protocol_stats else 0
+                self.logger.warning(f"Correcting {protocol_name} device count from {stats['devices']} to {corrected_count}")
+                stats['devices'] = corrected_count
 
         report_content = f"""============================================================
 HONO LOAD TEST DETAILED REPORT
