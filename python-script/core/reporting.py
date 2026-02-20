@@ -195,6 +195,17 @@ class ReportingManager:
             'success_rate_percent': 99.5,
             'min_throughput_rps': 10
         }
+        
+        # Initialize psutil process for CPU monitoring
+        self._process = None
+        if PSUTIL_AVAILABLE:
+            try:
+                self._process = psutil.Process()
+                # Initialize CPU monitoring with first call (establishes baseline)
+                self._process.cpu_percent(interval=None)
+            except Exception as e:
+                self.logger.warning(f"Failed to initialize psutil process: {e}")
+                self._process = None
 
     def initialize_test(self, protocols: List[str]):
         """Initialize test with specified protocols."""
@@ -701,14 +712,15 @@ Report generated at: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
                 self.time_series_data['cumulative_messages'].append(cumulative)
                 
                 # Memory and CPU usage (if psutil available)
-                if PSUTIL_AVAILABLE:
+                if PSUTIL_AVAILABLE and self._process:
                     try:
-                        process = psutil.Process()
-                        memory_mb = process.memory_info().rss / (1024 * 1024)
-                        cpu_percent = process.cpu_percent(interval=None)
+                        memory_mb = self._process.memory_info().rss / (1024 * 1024)
+                        # cpu_percent() returns percentage since last call
+                        cpu_percent = self._process.cpu_percent(interval=None)
                         self.time_series_data['memory_usage_mb'].append(memory_mb)
                         self.time_series_data['cpu_usage_percent'].append(cpu_percent)
-                    except Exception:
+                    except Exception as e:
+                        self.logger.debug(f"Failed to collect resource metrics: {e}")
                         self.time_series_data['memory_usage_mb'].append(0)
                         self.time_series_data['cpu_usage_percent'].append(0)
                 else:
