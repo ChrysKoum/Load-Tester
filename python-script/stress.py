@@ -774,10 +774,19 @@ async def enhanced_mqtt_worker_with_poisson(device, base_interval, reporting_man
                     current_rate = 1.0 / actual_interval_used if actual_interval_used > 0 else 0
                     reporting_manager.record_adapter_load(1, current_rate)
                 
+                # Use smart logger if available
+                if protocol_workers.message_logger:
+                    protocol_workers.message_logger.log_send_attempt(device.device_id, "mqtt", True, response_time_ms)
+                
                 message_count += 1
             else:
                 if reporting_manager:
                     reporting_manager.record_message_failed("mqtt")
+                
+                # Use smart logger if available
+                if protocol_workers.message_logger:
+                    error_msg = mqtt.error_string(msg_info.rc)
+                    protocol_workers.message_logger.log_send_attempt(device.device_id, "mqtt", False, response_time_ms, error_msg)
             
             # Sleep for Poisson interval
             await asyncio.sleep(interval)
@@ -868,11 +877,23 @@ async def enhanced_http_worker_with_poisson(device, base_interval, reporting_man
                             current_rate = 1.0 / actual_interval_used if actual_interval_used > 0 else 0
                             reporting_manager.record_adapter_load(1, current_rate)
                         
+                        # Use smart logger if available
+                        is_success = response.status < 400
+                        if protocol_workers.message_logger:
+                            if is_success:
+                                protocol_workers.message_logger.log_send_attempt(device.device_id, "http", True, response_time_ms)
+                            else:
+                                protocol_workers.message_logger.log_send_attempt(device.device_id, "http", False, response_time_ms, f"HTTP {response.status}")
+                        
                         message_count += 1
                 
                 except Exception as e:
                     if reporting_manager:
                         reporting_manager.record_message_failed("http")
+                    
+                    # Use smart logger if available
+                    if protocol_workers.message_logger:
+                        protocol_workers.message_logger.log_send_attempt(device.device_id, "http", False, 0, str(e))
                 
                 # Sleep for Poisson interval
                 await asyncio.sleep(interval)

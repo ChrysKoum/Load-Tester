@@ -36,6 +36,10 @@ class ProtocolWorkers:
         # Smart logger for message send/fail events
         self.smart_logger = smart_logger
         self.message_logger = MessageLogger(smart_logger) if smart_logger else None
+        if self.message_logger:
+            self.logger.info(f"✅ Smart logger enabled in ProtocolWorkers")
+        else:
+            self.logger.info(f"ℹ️  Smart logger disabled - using standard logging")
 
     def set_running(self, running: bool):
         self._running = running
